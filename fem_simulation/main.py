@@ -8,7 +8,6 @@ import sys
 from dataclasses import asdict
 from logging import basicConfig, INFO, getLogger
 from pathlib import Path
-
 import toml
 
 from load_config import load_config
@@ -34,6 +33,7 @@ def main(config_path: str):
 
     # config.toml: 入力設定をコピー
     import shutil
+
     shutil.copy(config_path, out_dir / "config.toml")
     logger.info(f"Configuration copied to {out_dir / 'config.toml'}")
 

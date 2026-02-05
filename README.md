@@ -23,3 +23,5 @@ Sugimoto lab.
     ```sh
     pip install -r ./requirements.txt
     ```
+
+> **Note**: NGSolve のインストールに問題がある場合は [NGSolve 公式ドキュメント](https://ngsolve.org/installation.html) を参照。
