@@ -1,3 +1,10 @@
+"""
+Usage
+-----
+python main.py [config_path] [log_path]
+"""
+
+import sys
 from logging import basicConfig, INFO, getLogger
 from pathlib import Path
 
@@ -23,11 +30,18 @@ def main(config_path: str):
 
 
 if __name__ == "__main__":
-    log_path = None
+    if len(sys.argv) > 1:
+        config_path = sys.argv[1]
+    else:
+        config_path = "config.toml"
+    if len(sys.argv) > 2:
+        log_path = sys.argv[2]
+    else:
+        log_path = None
     if log_path is not None:
         basicConfig(
             level=INFO,
-            format="%(asctime)s | %(levelname)s | (%(name)s) %(message)s",
+            format="%(asctime)s [%(levelname)s] (%(name)s) %(message)s",
             filename=log_path,
             filemode="w",
             force=True,
@@ -35,7 +49,7 @@ if __name__ == "__main__":
     else:
         basicConfig(
             level=INFO,
-            format="%(asctime)s | %(levelname)s | (%(name)s) %(message)s",
+            format="%(asctime)s [%(levelname)s] (%(name)s) %(message)s",
             force=True,
         )
-    main(config_path="config.toml")
+    main(config_path=config_path)

@@ -74,8 +74,8 @@ class PhysicalParameters:
 
     def calc_fermi_level(self) -> float:
         def charge_neutrality_eq(Ef: float):
-            p = self.Nv * F_half_aymerich_humet_np((self.Eg - Ef) / self.kT)
-            n = self.Nc * F_half_aymerich_humet_np(Ef / self.kT)
+            n = self.Nc * F_half_aymerich_humet_np((Ef - self.Eg) / self.kT)
+            p = self.Nv * F_half_aymerich_humet_np(-Ef / self.kT)
 
             Ndp = 0.0
             sum_ratios_d = sum(self.donor_ratios)
@@ -83,7 +83,7 @@ class PhysicalParameters:
                 Ndp += (
                     self.Nd
                     * (ratio / sum_ratios_d)
-                    / (1 + 2 * np.exp((Ef - Ed) / self.kT))
+                    / (1 + 2 * np.exp((Ef - self.Eg + Ed) / self.kT))
                 )
 
             Nap = 0.0

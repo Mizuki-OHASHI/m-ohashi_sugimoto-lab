@@ -20,8 +20,7 @@ class SimulationParameters:
     # Newton solver parameters
     maxit: int = 100
     maxerr: float = 1e-11
-    dampfactor: int = 1
-    # NOTE: ダンピング係数: 1 -> ダンピングなし, 大きいほどダンピングが強くなる
+    dampfactor: int = 1  # ダンピング係数: 1 -> ダンピングなし
 
 
 def run_fem(
@@ -85,15 +84,17 @@ def _setup_weak_form(
     sum_ratios_d = sum(phys.donor_ratios)
     for Ed, ratio in zip(phys.Ed, phys.donor_ratios):
         Ndp += ng.CoefficientFunction(
-            phys.Nd
+            c
+            * phys.Nd
             * (ratio / sum_ratios_d)
-            / (1 + 2 * _safe_exp((phys.Ef - Ed) / phys.kT + u_clip))
+            / (1 + 2 * _safe_exp((phys.Ef - phys.Eg + Ed) / phys.kT + u_clip))
         )
     Nap = ng.CoefficientFunction(0.0)
     sum_ratios_a = sum(phys.acceptor_ratios)
     for Ea, ratio in zip(phys.Ea, phys.acceptor_ratios):
         Nap += ng.CoefficientFunction(
-            phys.Na
+            c
+            * phys.Na
             * (ratio / sum_ratios_a)
             / (1 + 4 * _safe_exp((Ea - phys.Ef) / phys.kT - u_clip))
         )
@@ -135,7 +136,7 @@ def _solve_newton(
 
     a.Assemble()
 
-    logger.info("starting Newton solver...")
+    logger.info("Starting Newton solver...")
     converged, iter = ng.solvers.Newton(
         a,
         u,
@@ -231,18 +232,24 @@ def _save_potential(
 def _valuate_potential_at_line(
     u: ng.GridFunction, msh: ng.Mesh, coords: np.ndarray, axis: str, Vc: float
 ):
-    potential = []
-    valid = []
+    r_coords = coords[:, 0]
+    z_coords = coords[:, 1]
 
-    for coord in coords:
-        try:
-            if axis == "vertical":
-                val = u(msh(0.0, coord)) * Vc  # type: ignore
-            else:  # horizontal
+    try:
+        # ベクトル化評価
+        potential = np.array(u(msh(r_coords, z_coords))) * Vc  # type: ignore
+        valid = z_coords if axis == "vertical" else r_coords
+        return valid, potential
+    except Exception:
+        # フォールバック: 個別評価
+        logger.warning("Vectorized evaluation failed, falling back to loop")
+        potential = []
+        valid = []
+        for coord in coords:
+            try:
                 val = u(msh(coord[0], coord[1])) * Vc
-            potential.append(val)
-            valid.append(coord if axis == "vertical" else coord[0])
-        except Exception:
-            continue
-
-    return np.array(valid), np.array(potential)
+                potential.append(val)
+                valid.append(coord[1] if axis == "vertical" else coord[0])
+            except Exception:
+                continue
+        return np.array(valid), np.array(potential)
