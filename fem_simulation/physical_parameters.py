@@ -70,7 +70,7 @@ class PhysicalParameters:
         )
         self.Ef = self.calc_fermi_level()
 
-        logger.info(dict(PhysicalParameters=asdict(self)))
+        logger.info(asdict(self))
 
     def calc_fermi_level(self) -> float:
         def charge_neutrality_eq(Ef: float):

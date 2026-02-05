@@ -37,7 +37,7 @@ class GeometricParameters:
         assert self.n_tip_arc_points >= 3 and self.n_tip_arc_points % 2 == 1
         assert 0.1 <= self.mesh_scale <= 10.0
 
-        logger.info(dict(GeometricParameters=asdict(self)))
+        logger.info(asdict(self))
 
 
 def create_mesh(geom: GeometricParameters) -> Mesh:

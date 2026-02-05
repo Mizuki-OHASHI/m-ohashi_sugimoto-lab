@@ -1,0 +1,6 @@
+[physical_parameters]
+
+[geometric_parameters]
+tip_sample_distance = 5.0e-9 # [m]
+
+[simulation_parameters]
