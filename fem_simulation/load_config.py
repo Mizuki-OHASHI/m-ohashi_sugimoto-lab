@@ -10,6 +10,7 @@ class FEMConfig:
     physical_parameters: dict
     geometric_parameters: dict
     simulation_parameters: dict
+    out_dir: str
 
 
 def load_config(config_path: str) -> FEMConfig:
@@ -20,4 +21,5 @@ def load_config(config_path: str) -> FEMConfig:
         physical_parameters=conf_dict["physical_parameters"],
         geometric_parameters=conf_dict["geometric_parameters"],
         simulation_parameters=conf_dict["simulation_parameters"],
+        out_dir=conf_dict["out_dir"],
     )
