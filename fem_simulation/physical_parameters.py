@@ -56,8 +56,8 @@ class PhysicalParameters:
 
         self.kT = const.k * self.T / const.e  # [eV]
 
-        self.n0 = (self.Nd + np.sqrt(self.Nd**2 + 4 * self.ni**2)) / 2
-        self.p0 = self.ni**2 / self.n0
+        self.n0 = float((self.Nd + np.sqrt(self.Nd**2 + 4 * self.ni**2)) / 2)
+        self.p0 = float(self.ni**2 / self.n0)
         self.Nc = (
             self.gc
             * 2

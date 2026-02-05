@@ -1,0 +1,42 @@
+[physical_parameters]
+T = 300.0
+Nd = 1e+22
+Na = 0.0
+ni = 8200000000000000.0
+sigma = 1000000000000000.0
+mde = 3.825941159838e-31
+mdh = 9.1093837139e-31
+gc = 3
+gv = 1
+epsilon_sem = 9.7
+epsilon_ox = 3.9
+epsilon_vac = 1.0
+Eg = 3.26
+Ed = [ 0.124, 0.066,]
+donor_ratios = [ 1.0, 1.88,]
+Ea = []
+acceptor_ratios = []
+kT = 0.025851999786435535
+n0 = 1.0000000000006723e+22
+p0 = 6723999999.99548
+Nc = 2.049119096260857e+25
+Nv = 2.509412230351941e+25
+Ef = 3.064735677281283
+
+[geometric_parameters]
+tip_sample_distance = 5e-9
+Lc = 1e-9
+l_vac = 2.0000000000000002e-7
+l_ox = 1e-9
+l_sem = 1.95e-7
+l_radius = 5.000000000000001e-7
+tip_radius = 4e-8
+tip_slope_deg = 15.0
+n_tip_arc_points = 9
+mesh_scale = 1.0
+
+[simulation_parameters]
+Vtip_list = [ -1.0, -0.5, 0.0, 0.5, 1.0,]
+maxit = 100
+maxerr = 1e-11
+dampfactor = 1

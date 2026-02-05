@@ -40,20 +40,58 @@ def run_fem(
     a = _setup_weak_form(mesh, V, phys, geom, hmtp_charge, hmtp_sigma)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for i, Vtip in enumerate(siml.Vtip_list):
-        logger.info(
-            f"Solving for tip voltage Vtip = {Vtip:.2f} V ({i+1}/{len(siml.Vtip_list)})"
-        )
-        # set boundary conditions (dirichlet)
+
+    # Vtip_list を分割・ソート
+    vtip_set = set(siml.Vtip_list)
+    has_zero = 0.0 in vtip_set
+
+    vtip_array = np.array(siml.Vtip_list)
+    positive = np.sort(vtip_array[vtip_array > 0])  # 正、昇順
+    negative = np.sort(vtip_array[vtip_array < 0])[::-1]  # 負、降順 (0に近い順)
+
+    total = len(siml.Vtip_list)
+    solved = 0
+
+    def solve_and_save(Vtip: float, save: bool):
+        nonlocal solved
+        # 境界条件設定
         u.Set(ng.CoefficientFunction(0.0), definedon=mesh.Boundaries(geom.bc_ground))
         u.Set(
             ng.CoefficientFunction(Vtip / phys.kT),
             definedon=mesh.Boundaries(geom.bc_tip),
         )
+        # Newton 法
         _solve_newton(mesh, geom, siml, a, u, V, hmtp_charge, hmtp_sigma)
-        dir_path = out_dir / f"Vtip_{Vtip:.2f}V"
-        dir_path.mkdir(parents=True, exist_ok=True)
-        _save_potential(mesh, u, phys, geom, dir_path)
+        # 保存
+        if save:
+            solved += 1
+            logger.info(f"Solved Vtip = {Vtip:.2f} V ({solved}/{total})")
+            dir_path = out_dir / f"Vtip_{Vtip:.2f}V"
+            dir_path.mkdir(parents=True, exist_ok=True)
+            _save_potential(mesh, u, phys, geom, dir_path)
+
+    # 1. まず 0.0V を解く (初期値)
+    logger.info("Solving initial state at Vtip = 0.00 V")
+    solve_and_save(0.0, save=has_zero)
+
+    # 2. 0.0V の解を保存 (負の電圧処理前に復元するため)
+    u_zero = u.vec.CreateVector()
+    u_zero.data = u.vec
+
+    # 3. 正の電圧を処理 (0.0V の解から継続)
+    for Vtip in positive:
+        logger.info(f"Solving for tip voltage Vtip = {Vtip:.2f} V")
+        solve_and_save(float(Vtip), save=True)
+
+    # 4. 0.0V の解に戻す
+    if len(negative) > 0:
+        logger.info("Restoring solution at Vtip = 0.00 V for negative voltages")
+        u.vec.data = u_zero
+
+    # 5. 負の電圧を処理 (0.0V の解から継続)
+    for Vtip in negative:
+        logger.info(f"Solving for tip voltage Vtip = {Vtip:.2f} V")
+        solve_and_save(float(Vtip), save=True)
 
 
 def _clamp(val, bound):
@@ -194,7 +232,7 @@ def _save_potential(
     )
 
     # save line profiles
-    potential_interface_path = dir_path / "potential_interface.txt"
+    potential_interface_path = dir_path / "potential_interface.csv"
     r_coords = np.linspace(0, geom.l_radius, n_points + 1, endpoint=True)
     interface_coords = np.column_stack((r_coords, np.full_like(r_coords, -geom.l_ox)))
     valid_r_interface, potential_r_interface = _valuate_potential_at_line(
@@ -211,7 +249,7 @@ def _save_potential(
         f"Electrostatic potential at interface saved to {potential_interface_path}"
     )
 
-    potential_axis_path = dir_path / "potential_axis.txt"
+    potential_axis_path = dir_path / "potential_axis.csv"
     z_coords = np.linspace(
         -(geom.l_ox + geom.l_sem), geom.l_sem, n_points + 1, endpoint=True
     )

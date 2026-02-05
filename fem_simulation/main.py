@@ -5,8 +5,11 @@ python main.py [config_path] [log_path]
 """
 
 import sys
+from dataclasses import asdict
 from logging import basicConfig, INFO, getLogger
 from pathlib import Path
+
+import toml
 
 from load_config import load_config
 from physical_parameters import PhysicalParameters
@@ -24,8 +27,31 @@ def main(config_path: str):
     geom = GeometricParameters(**conf.geometric_parameters)
     siml = SimulationParameters(**conf.simulation_parameters)
     mesh = create_mesh(geom)
+
+    # 設定とパラメータを保存
+    out_dir = Path(conf.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # config.toml: 入力設定をコピー
+    import shutil
+    shutil.copy(config_path, out_dir / "config.toml")
+    logger.info(f"Configuration copied to {out_dir / 'config.toml'}")
+
+    # params.toml: 計算されたパラメータを含む完全な状態
+    params_path = out_dir / "params.toml"
+    with open(params_path, "w") as f:
+        toml.dump(
+            {
+                "physical_parameters": asdict(phys),
+                "geometric_parameters": asdict(geom),
+                "simulation_parameters": asdict(siml),
+            },
+            f,
+        )
+    logger.info(f"Parameters saved to {params_path}")
+
     logger.info("Starting FEM simulation")
-    run_fem(mesh, phys, geom, siml, Path(conf.out_dir))
+    run_fem(mesh, phys, geom, siml, out_dir)
     logger.info("FEM simulation completed")
 
 
