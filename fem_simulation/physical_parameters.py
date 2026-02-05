@@ -78,20 +78,20 @@ class PhysicalParameters:
             n = self.Nc * F_half_aymerich_humet_np(Ef / self.kT)
 
             Ndp = 0.0
-            sum_ratios = sum(self.donor_ratios)
+            sum_ratios_d = sum(self.donor_ratios)
             for Ed, ratio in zip(self.Ed, self.donor_ratios):
                 Ndp += (
                     self.Nd
-                    * (ratio / sum_ratios)
+                    * (ratio / sum_ratios_d)
                     / (1 + 2 * np.exp((Ef - Ed) / self.kT))
                 )
 
             Nap = 0.0
-            sum_ratios = sum(self.acceptor_ratios)
+            sum_ratios_a = sum(self.acceptor_ratios)
             for Ea, ratio in zip(self.Ea, self.acceptor_ratios):
                 Nap += (
                     self.Na
-                    * (ratio / sum_ratios)
+                    * (ratio / sum_ratios_a)
                     / (1 + 4 * np.exp((Ea - Ef) / self.kT))
                 )
 

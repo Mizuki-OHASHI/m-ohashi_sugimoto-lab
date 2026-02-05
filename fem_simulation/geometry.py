@@ -33,11 +33,32 @@ class GeometricParameters:
     #   Netgen では円弧を直接指定できないので, 円弧上に離散点を配置してその間を 3 次のスプライン補間で結ぶ
     mesh_scale: float = 1.0  # mesh scale factor
 
+    # domain index
+    out_id = 0
+    sem_id = 1
+    ox_id = 2
+    vac_id = 3
+    sem_name = "semiconductor"
+    ox_name = "oxide"
+    vac_name = "vacuum"
+
+    # boundary conditions
+    bc_axis = "axis"
+    bc_far = "far-field"
+    bc_ground = "ground"
+    bc_top = "top"
+    bc_surf = "surface"  # Oxide-Vacuum surface
+    bc_intf = "interface"  # Oxide-Semiconductor interface
+    bc_tip = "tip"  # Tip surface
+
     def __post_init__(self):
         assert self.n_tip_arc_points >= 3 and self.n_tip_arc_points % 2 == 1
         assert 0.1 <= self.mesh_scale <= 10.0
 
         logger.info(asdict(self))
+        # lines = json.dumps(asdict(self), indent=4).splitlines()
+        # for line in lines:
+        #     logger.info(line)
 
 
 def create_mesh(geom: GeometricParameters) -> Mesh:
@@ -80,20 +101,18 @@ def create_mesh(geom: GeometricParameters) -> Mesh:
     tip_edge = g.AppendPoint(tip_edge_r, l_vac)
 
     # --- lines ---
-    # domain index
-    out_id = 0
-    sem_id = 1
-    ox_id = 2
-    vac_id = 3
+    out_id = geom.out_id
+    sem_id = geom.sem_id
+    ox_id = geom.ox_id
+    vac_id = geom.vac_id
 
-    # boundary conditions
-    bc_axis = "axis"
-    bc_far = "far-field"
-    bc_ground = "ground"
-    bc_top = "top"
-    bc_surf = "surface"  # Oxide-Vacuum surface
-    bc_intf = "interface"  # Oxide-Semiconductor interface
-    bc_tip = "tip"  # Tip surface
+    bc_axis = geom.bc_axis
+    bc_far = geom.bc_far
+    bc_ground = geom.bc_ground
+    bc_top = geom.bc_top
+    bc_surf = geom.bc_surf
+    bc_intf = geom.bc_intf
+    bc_tip = geom.bc_tip
 
     # axes lines
     g.Append(["line", ax1, ax2], bc=bc_axis, leftdomain=out_id, rightdomain=sem_id)
@@ -138,9 +157,9 @@ def create_mesh(geom: GeometricParameters) -> Mesh:
     )
 
     # --- materials ---
-    g.SetMaterial(sem_id, "semiconductor")
-    g.SetMaterial(ox_id, "oxide")
-    g.SetMaterial(vac_id, "vacuum")
+    g.SetMaterial(sem_id, geom.sem_name)
+    g.SetMaterial(ox_id, geom.ox_name)
+    g.SetMaterial(vac_id, geom.vac_name)
 
     # --- generate mesh ---
     logger.info("Generating mesh...")

@@ -11,11 +11,11 @@ logger = getLogger(__name__)
 
 def main(config_path: str):
     conf = load_config(config_path)
-    params = PhysicalParameters(**conf.physical_parameters)
+    phys = PhysicalParameters(**conf.physical_parameters)
     geom = GeometricParameters(**conf.geometric_parameters)
     siml = SimulationParameters(**conf.simulation_parameters)
     mesh = create_mesh(geom)
-    results = run_fem(mesh, params, siml)
+    results = run_fem(mesh, phys, geom, siml)
 
 
 if __name__ == "__main__":
