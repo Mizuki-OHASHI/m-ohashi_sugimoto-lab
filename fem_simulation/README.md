@@ -1,12 +1,12 @@
 # FEM Simulation for STM/AFM Tip-Sample Electrostatic Potential
 
-STM/AFM チップ下の半導体（SiC/SiO$_2$）における静電ポテンシャルを有限要素法（FEM）と Newton 法で計算するシミュレーションコード。
+STM/AFM チップ下の半導体（SiC/SiO₂）における静電ポテンシャルを有限要素法（FEM）と Newton 法で計算するシミュレーションコード。
 
 ## 概要
 
 このコードは以下を計算する：
 - STM/AFM チップ直下の半導体中の静電ポテンシャル分布
-- 酸化膜（SiO$_2$）と真空領域を含む軸対称モデル
+- 酸化膜（SiO₂）と真空領域を含む軸対称モデル
 
 使用ライブラリ：
 - **NGSolve**: FEM ソルバー
@@ -103,7 +103,7 @@ results/example/
 ![Geometry](assets/geometry.png)
 
 - **(1) Semiconductor**: 半導体（SiC）
-- **(2) Oxide**: 酸化膜（SiO$_2$）
+- **(2) Oxide**: 酸化膜（SiO₂）
 - **(3) Vacuum**: 真空領域（チップを含む）
 
 ### 支配方程式
