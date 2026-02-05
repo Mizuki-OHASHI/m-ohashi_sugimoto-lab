@@ -1,11 +1,11 @@
-# FEM Simulation for STM/AFM Tip-Sample Electrostatic Potential
+# FEM Simulation for AFM Tip-Sample Electrostatic Potential
 
-STM/AFM チップ下の半導体（SiC/SiO₂）における静電ポテンシャルを有限要素法（FEM）と Newton 法で計算するシミュレーションコード。
+AFM 探針下の半導体（SiC/SiO₂）における静電ポテンシャルを有限要素法（FEM）と Newton 法で計算するシミュレーションコード。
 
 ## 概要
 
 このコードは以下を計算する：
-- STM/AFM チップ直下の半導体中の静電ポテンシャル分布
+- AFM 探針直下の半導体中の静電ポテンシャル分布
 - 酸化膜（SiO₂）と真空領域を含む軸対称モデル
 
 使用ライブラリ：
@@ -49,16 +49,16 @@ out_dir = "results/example"  # 出力ディレクトリ
 # donor_ratios = [1.0, 1.88]   # ドナー準位の比率
 
 [geometric_parameters]
-tip_sample_distance = 5.0e-9  # チップ-試料間距離 [m]（必須）
+tip_sample_distance = 5.0e-9  # 探針-試料間距離 [m]（必須）
 # l_vac = 200.0e-9             # 真空層の厚さ [m]
 # l_ox = 1.0e-9                # 酸化膜の厚さ [m]
 # l_sem = 195.0e-9             # 半導体層の厚さ [m]
 # l_radius = 500.0e-9          # シミュレーション領域の半径 [m]
-# tip_radius = 40.0e-9         # チップ先端の曲率半径 [m]
-# tip_slope_deg = 15.0         # チップの傾斜角 [度]
+# tip_radius = 40.0e-9         # 探針先端の曲率半径 [m]
+# tip_slope_deg = 15.0         # 探針の傾斜角 [度]
 
 [simulation_parameters]
-Vtip_list = [-1.0, -0.5, 0.0, 0.5, 1.0]  # チップ電圧のリスト [V]（必須）
+Vtip_list = [-1.0, -0.5, 0.0, 0.5, 1.0]  # 探針電圧のリスト [V]（必須）
 # maxit = 100                  # Newton 法の最大反復回数
 # maxerr = 1e-11               # 収束判定の誤差閾値
 # dampfactor = 1               # ダンピング係数（1 = ダンピングなし）
@@ -104,7 +104,7 @@ results/example/
 
 - **(1) Semiconductor**: 半導体（SiC）
 - **(2) Oxide**: 酸化膜（SiO₂）
-- **(3) Vacuum**: 真空領域（チップを含む）
+- **(3) Vacuum**: 真空領域（探針を含む）
 
 ### 支配方程式
 
@@ -148,7 +148,7 @@ $F_{1/2}$ には Aymerich-Humet らの近似式を使用。
 
 | 境界                 | 条件                                                                       | 説明               |
 | -------------------- | -------------------------------------------------------------------------- | ------------------ |
-| Tip (`bc_tip`)       | Dirichlet: $\varphi = V_\mathrm{tip}/kT$                                   | チップ電圧         |
+| Tip (`bc_tip`)       | Dirichlet: $\varphi = V_\mathrm{tip}/kT$                                   | 探針電圧           |
 | Ground (`bc_ground`) | Dirichlet: $\varphi = 0$                                                   | 半導体底面（接地） |
 | Far-field (`bc_far`) | Robin: $\varepsilon \partial\varphi/\partial n + (\varepsilon/L)\varphi=0$ | 遠方境界（減衰）   |
 | Axis (`bc_axis`)     | 自然境界条件                                                               | 対称軸             |
