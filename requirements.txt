@@ -2,7 +2,7 @@ toml
 numpy
 scipy
 
-ngsolve
+ngsolve==6.2.2506
 
 matplotlib
 
