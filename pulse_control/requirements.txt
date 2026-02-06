@@ -1,0 +1,8 @@
+pyvisa
+numpy
+matplotlib
+toml
+streamlit
+
+# dev
+ruff
