@@ -17,7 +17,7 @@ class GeometricParameters:
 
     # vertical dimensions
     l_vac: float = 200.0 * const.nano  # vacuum thickness [m]
-    l_ox: float = 1.0 * const.nano  # oxide thickness [m]
+    l_ox: float = 5.0 * const.nano  # oxide thickness [m]
     l_sem: float = 195.0 * const.nano  # semiconductor thickness [m]
 
     # lateral dimensions

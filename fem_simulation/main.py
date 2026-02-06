@@ -5,6 +5,7 @@ python main.py [config_path] [log_path]
 """
 
 import sys
+import shutil
 from dataclasses import asdict
 from logging import basicConfig, INFO, getLogger
 from pathlib import Path
@@ -32,8 +33,6 @@ def main(config_path: str):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # config.toml: 入力設定をコピー
-    import shutil
-
     shutil.copy(config_path, out_dir / "config.toml")
     logger.info(f"Configuration copied to {out_dir / 'config.toml'}")
 

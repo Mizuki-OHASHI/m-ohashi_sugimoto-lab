@@ -232,16 +232,19 @@ def _save_potential(
     )
 
     # save line profiles
+    # NOTE: メッシュ座標は Lc で無次元化されているため、座標を Lc で割る必要がある
     potential_interface_path = dir_path / "potential_interface.csv"
-    r_coords = np.linspace(0, geom.l_radius, n_points + 1, endpoint=True)
-    interface_coords = np.column_stack((r_coords, np.full_like(r_coords, -geom.l_ox)))
+    r_dimless = np.linspace(0, geom.l_radius / geom.Lc, n_points + 1, endpoint=True)
+    interface_coords = np.column_stack(
+        (r_dimless, np.full_like(r_dimless, -geom.l_ox / geom.Lc))
+    )
     valid_r_interface, potential_r_interface = _valuate_potential_at_line(
         u, mesh, interface_coords, "horizontal", phys.kT
     )
     np.savetxt(
         potential_interface_path,
-        np.column_stack((valid_r_interface, potential_r_interface)),
-        header="r[nm],potential[V]",
+        np.column_stack((valid_r_interface * geom.Lc, potential_r_interface)),
+        header="r[m],potential[V]",
         comments="",
         delimiter=",",
     )
@@ -250,17 +253,20 @@ def _save_potential(
     )
 
     potential_axis_path = dir_path / "potential_axis.csv"
-    z_coords = np.linspace(
-        -(geom.l_ox + geom.l_sem), geom.l_sem, n_points + 1, endpoint=True
+    z_dimless = np.linspace(
+        -(geom.l_ox + geom.l_sem) / geom.Lc,
+        geom.tip_sample_distance / geom.Lc,
+        n_points + 1,
+        endpoint=True,
     )
-    axis_coords = np.column_stack((np.full_like(z_coords, 0.0), z_coords))
+    axis_coords = np.column_stack((np.full_like(z_dimless, 0.0), z_dimless))
     valid_z_axis, potential_z_axis = _valuate_potential_at_line(
         u, mesh, axis_coords, "vertical", phys.kT
     )
     np.savetxt(
         potential_axis_path,
-        np.column_stack((valid_z_axis, potential_z_axis)),
-        header="z[nm],potential[V]",
+        np.column_stack((valid_z_axis * geom.Lc, potential_z_axis)),
+        header="z[m],potential[V]",
         comments="",
         delimiter=",",
     )

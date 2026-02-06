@@ -6,4 +6,4 @@ out_dir = "results/example"
 tip_sample_distance = 5.0e-9 # [m]
 
 [simulation_parameters]
-Vtip_list = [-1.0, -0.5, 0.0, 0.5, 1.0] # [V]
+Vtip_list = [-2.6, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0] # [V]

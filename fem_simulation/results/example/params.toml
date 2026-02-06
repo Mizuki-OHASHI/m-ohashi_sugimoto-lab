@@ -27,7 +27,7 @@ Ef = 3.064735677281283
 tip_sample_distance = 5e-9
 Lc = 1e-9
 l_vac = 2.0000000000000002e-7
-l_ox = 1e-9
+l_ox = 5e-9
 l_sem = 1.95e-7
 l_radius = 5.000000000000001e-7
 tip_radius = 4e-8
@@ -36,7 +36,7 @@ n_tip_arc_points = 9
 mesh_scale = 1.0
 
 [simulation_parameters]
-Vtip_list = [ -1.0, -0.5, 0.0, 0.5, 1.0,]
+Vtip_list = [ -2.6, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0,]
 maxit = 100
 maxerr = 1e-11
 dampfactor = 1
