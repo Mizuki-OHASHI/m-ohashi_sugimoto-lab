@@ -15,14 +15,22 @@ from logging import DEBUG, FileHandler, Formatter, StreamHandler, getLogger
 from pathlib import Path
 
 LOG_DIR = Path(__file__).parent / "logs"
-LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
+LOG_FORMAT = "%(asctime)s [%(levelname)s] (%(name)s) %(message)s"
+
+_initialized = False
 
 
 def setup_logging() -> None:
     """Configure the root logger with FileHandler + StreamHandler.
 
-    Each call creates a new timestamped log file.
+    Guarded so that repeated calls (e.g. Streamlit reruns) are no-ops.
+    A new log file is created only once per process.
     """
+    global _initialized
+    if _initialized:
+        return
+    _initialized = True
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")

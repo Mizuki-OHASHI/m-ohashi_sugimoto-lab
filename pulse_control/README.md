@@ -6,6 +6,10 @@ Square モードで周波数を固定し、Duty 可変でパルス幅を制御�
 ## ドキュメント
 
 - [81180A Arbitrary Waveform Generator User's Guide (Keysight)](https://www.keysight.com/us/en/assets/9018-03346/user-manuals/9018-03346.pdf)
+  - SCPI コマンドの説明は **Chapter 4** に記載
+  - PDF のダウンロードにはメールアドレスの登録が必要
+  - 研究室ファイルサーバーにもアップロード済み:\
+    `大橋 Ohashi\docs\Agilent81180A_UsersGuide.pdf`
 
 ## 動作環境
 
@@ -79,6 +83,6 @@ pulse_control/
 ## Lint / Format
 
 ```bash
-ruff check pulse_control/
-ruff format pulse_control/
+ruff check .
+ruff format .
 ```
