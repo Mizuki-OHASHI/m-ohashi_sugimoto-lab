@@ -98,10 +98,10 @@ class PulseInstrument:
     def set_pulse_width(self, width: float, frequency: float) -> None:
         """パルス幅を duty cycle に変換して設定する.
 
-        VBA と同様にチャンネル選択後にパラメータを送信する。
+        setup() で CH1 が選択済みのため、チャンネル選択は省略し
+        コマンド数を最小限にしてグリッチを短縮する。
         """
         dcycle = width * frequency * 100
-        self._write(":INST CH1")
         self._write(f":SQUare:DCYCle {dcycle}")
 
     # ------------------------------------------------------------------ #
