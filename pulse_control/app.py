@@ -9,10 +9,13 @@ from __future__ import annotations
 import re
 import tempfile
 from logging import getLogger
+from pathlib import Path
 
 import streamlit as st
 
 from config import DEFAULT_VISA_ADDRESS, SweepConfig
+
+DEFAULT_CONFIG = Path("sweep_config.toml")
 from core import PulseInstrument, run_sweep
 from log_setup import setup_logging
 
@@ -63,7 +66,7 @@ def format_si(value: float) -> str:
 #  Session initialisation
 # ================================================================== #
 if "config" not in st.session_state:
-    st.session_state.config = SweepConfig()
+    st.session_state.config = SweepConfig.from_toml(DEFAULT_CONFIG)
 
 cfg: SweepConfig = st.session_state.config
 

@@ -22,21 +22,21 @@ class SweepConfig:
     """Pulse width sweep configuration for Agilent 81180A AWG."""
 
     # Connection
-    visa_address: str = DEFAULT_VISA_ADDRESS
+    visa_address: str
 
     # Pulse shape
-    v_on: float = 0.5   # Voltage during pulse ON [V]
-    v_off: float = 0.0  # Voltage during pulse OFF (base) [V]
+    v_on: float        # Voltage during pulse ON [V]
+    v_off: float       # Voltage during pulse OFF (base) [V]
 
     # Sweep parameters
-    width_start: float = 0.001  # Pulse width start [s]
-    width_stop: float = 0.005   # Pulse width stop [s]
-    width_step: float = 0.001   # Pulse width step [s]
+    width_start: float  # Pulse width start [s]
+    width_stop: float   # Pulse width stop [s]
+    width_step: float   # Pulse width step [s]
 
     # AWG parameters
-    frequency: float = 1000.0  # Repetition frequency [Hz] (width controlled via duty cycle)
-    trigger_delay: int = 0     # Trigger delay [sample points] (multiple of 8)
-    wait_time: float = 1.0     # Wait time between sweep steps [s]
+    frequency: float    # Repetition frequency [Hz] (width controlled via duty cycle)
+    trigger_delay: int  # Trigger delay [sample points] (multiple of 8)
+    wait_time: float    # Wait time between sweep steps [s]
 
     @property
     def period(self) -> float:
