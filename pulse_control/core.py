@@ -16,7 +16,7 @@ class PulseInstrument:
     """Keysight M96 PXI SMU のパルス測定制御."""
 
     def __init__(self, visa_address: str) -> None:
-        rm = pyvisa.ResourceManager()
+        rm = pyvisa.ResourceManager("@py")
         self.instr = rm.open_resource(visa_address)
         self.instr.read_termination = "\n"
         self.instr.write_termination = "\n"
@@ -29,7 +29,7 @@ class PulseInstrument:
     @staticmethod
     def check_connection(visa_address: str) -> str:
         """接続チェック. 成功時は *IDN? の応答を返す. 失敗時は例外を送出."""
-        rm = pyvisa.ResourceManager()
+        rm = pyvisa.ResourceManager("@py")
         instr = rm.open_resource(visa_address)
         instr.read_termination = "\n"
         instr.write_termination = "\n"
