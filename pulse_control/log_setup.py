@@ -1,4 +1,4 @@
-"""ロギング初期化モジュール.
+"""Logging initialisation module.
 
 Usage:
     from log_setup import setup_logging
@@ -19,9 +19,9 @@ LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
 
 
 def setup_logging() -> None:
-    """ルートロガーに FileHandler + StreamHandler を設定する.
+    """Configure the root logger with FileHandler + StreamHandler.
 
-    呼び出すたびに新しいタイムスタンプ付きログファイルが作成される。
+    Each call creates a new timestamped log file.
     """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 

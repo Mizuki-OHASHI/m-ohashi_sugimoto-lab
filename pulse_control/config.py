@@ -1,4 +1,4 @@
-"""パルス幅掃引の設定管理モジュール（Agilent 81180A AWG 用）."""
+"""Sweep configuration module for Agilent 81180A AWG."""
 
 from __future__ import annotations
 
@@ -12,66 +12,66 @@ logger = getLogger(__name__)
 
 
 DEFAULT_VISA_ADDRESS = "TCPIP0::192.168.0.251::5025::SOCKET"
-# NOTE: TCPIP0::[IPアドレス]::5025::SOCKET の形式で指定
-# - IPアドレスは装置の Utility > Remote Interface > LAN で確認
-# - LAN が繋がっているかを確認したい場合には PowerShell で ping [IPアドレス] を実行
+# NOTE: Format is TCPIP0::[IP address]::5025::SOCKET
+# - Check IP address on the instrument: Utility > Remote Interface > LAN
+# - To verify LAN connectivity, run `ping [IP address]` in PowerShell
 
 
 @dataclass
 class SweepConfig:
-    """パルス幅掃引の設定（Agilent 81180A AWG 用）."""
+    """Pulse width sweep configuration for Agilent 81180A AWG."""
 
-    # 接続
+    # Connection
     visa_address: str = DEFAULT_VISA_ADDRESS
 
-    # パルス形状
-    v_on: float = 0.5  # パルスON時の電圧 [V]
-    v_off: float = 0.0  # パルスOFF時の電圧（ベース） [V]
+    # Pulse shape
+    v_on: float = 0.5   # Voltage during pulse ON [V]
+    v_off: float = 0.0  # Voltage during pulse OFF (base) [V]
 
-    # 掃引パラメータ
-    width_start: float = 0.001  # パルス幅の開始値 [s]
-    width_stop: float = 0.005  # パルス幅の終了値 [s]
-    width_step: float = 0.001  # パルス幅のステップ [s]
+    # Sweep parameters
+    width_start: float = 0.001  # Pulse width start [s]
+    width_stop: float = 0.005   # Pulse width stop [s]
+    width_step: float = 0.001   # Pulse width step [s]
 
-    # AWG パラメータ
-    frequency: float = 1000.0  # 周波数 [Hz]（固定。duty で幅を制御）
-    trigger_delay: int = 0  # トリガー遅延 [サンプルポイント数]（8 の倍数）
-    wait_time: float = 1.0  # 掃引ステップ間の待ち時間 [s]
+    # AWG parameters
+    frequency: float = 1000.0  # Repetition frequency [Hz] (width controlled via duty cycle)
+    trigger_delay: int = 0     # Trigger delay [sample points] (multiple of 8)
+    wait_time: float = 1.0     # Wait time between sweep steps [s]
 
     @property
     def period(self) -> float:
-        """周期 [s] = 1 / frequency."""
+        """Period [s] = 1 / frequency."""
         return 1.0 / self.frequency
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
-        """TOML ファイルから設定を読み込む.
+        """Load configuration from a TOML file.
 
-        [awg] セクションに frequency または period のどちらかを記載可能。
-        両方ある場合は frequency が優先される。
+        Either frequency or period can be specified in the [awg] section.
+        If both are present, frequency takes precedence.
         """
-        logger.info("TOML 読み込み: %s", path)
+        logger.info("Loading TOML: %s", path)
         data = toml.load(path)
-        # フラットに展開（セクション付き TOML に対応）
+        # Flatten sections into a single dict
         flat: dict = {}
         for value in data.values():
             if isinstance(value, dict):
                 flat.update(value)
             else:
                 flat[str(value)] = value
-        # period → frequency 変換
+        # Convert period to frequency if needed
         if "period" in flat and "frequency" not in flat:
             flat["frequency"] = 1.0 / flat.pop("period")
         elif "period" in flat:
-            flat.pop("period")  # frequency が優先
-        # dataclass のフィールド名のみ取り出す
+            flat.pop("period")  # frequency takes precedence
+        # Keep only valid dataclass field names
         valid_keys = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in flat.items() if k in valid_keys}
         return cls(**filtered)
 
     def to_toml(self, path: str | Path) -> None:
-        """TOML ファイルへ書き出す（frequency と period の両方を記載）."""
-        logger.info("TOML 書き出し: %s", path)
+        """Export to a TOML file (includes both frequency and period)."""
+        logger.info("Writing TOML: %s", path)
         data = {
             "connection": {
                 "visa_address": self.visa_address,
@@ -98,50 +98,50 @@ class SweepConfig:
             toml.dump(data, f)
 
     def validate(self) -> list[str]:
-        """パラメータの整合性チェック. エラーメッセージのリストを返す（空なら OK）."""
-        logger.info("バリデーション実行")
+        """Validate parameter consistency. Returns a list of error messages (empty if OK)."""
+        logger.info("Running validation")
         errors: list[str] = []
 
         if self.width_start <= 0:
-            errors.append("width_start は正の値でなければなりません")
+            errors.append("width_start must be positive")
         if self.width_stop <= 0:
-            errors.append("width_stop は正の値でなければなりません")
+            errors.append("width_stop must be positive")
         if self.width_step <= 0:
-            errors.append("width_step は正の値でなければなりません")
+            errors.append("width_step must be positive")
 
         if self.frequency <= 0:
-            errors.append("frequency は正の値でなければなりません")
+            errors.append("frequency must be positive")
 
         if self.trigger_delay < 0:
-            errors.append("trigger_delay は 0 以上でなければなりません")
+            errors.append("trigger_delay must be >= 0")
         if self.trigger_delay % 8 != 0:
-            errors.append("trigger_delay は 8 の倍数でなければなりません")
+            errors.append("trigger_delay must be a multiple of 8")
 
         if self.wait_time < 0:
-            errors.append("wait_time は 0 以上でなければなりません")
+            errors.append("wait_time must be >= 0")
 
-        # duty cycle の範囲チェック（VBA UpdateSQR: 0.1〜99.9%）
+        # Duty cycle range check (VBA UpdateSQR: 0.1–99.9%)
         for width in [self.width_start, self.width_stop]:
             dcycle = width * self.frequency * 100
             if dcycle < 0.1 or dcycle > 99.9:
                 errors.append(
-                    f"パルス幅 {width:.6f} s での duty cycle = {dcycle:.2f}% "
-                    "が範囲外です（0.1〜99.9%）"
+                    f"Duty cycle = {dcycle:.2f}% at width {width:.6f} s "
+                    "is out of range (0.1–99.9%)"
                 )
 
-        # 振幅・オフセットの範囲チェック（VBA UpdateSQR と同じ制限値）
+        # Amplitude/offset range check (same limits as VBA UpdateSQR)
         ampl = (self.v_on - self.v_off) / 2
         if ampl < 0.05 or ampl > 2:
             errors.append(
-                f"振幅 = {ampl:.4f} V が範囲外です（0.05〜2.0 V）"
+                f"Amplitude = {ampl:.4f} V is out of range (0.05–2.0 V)"
             )
         offs = (self.v_on + self.v_off) / 4
         if abs(offs) > 1.5:
             errors.append(
-                f"オフセット = {offs:.4f} V が範囲外です（-1.5〜1.5 V）"
+                f"Offset = {offs:.4f} V is out of range (-1.5–1.5 V)"
             )
 
         for e in errors:
-            logger.warning("バリデーションエラー: %s", e)
+            logger.warning("Validation error: %s", e)
 
         return errors
