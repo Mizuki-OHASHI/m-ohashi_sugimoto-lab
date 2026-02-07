@@ -38,9 +38,6 @@ class SweepConfig:
     trigger_delay: int = 0  # トリガー遅延 [サンプルポイント数]（8 の倍数）
     wait_time: float = 1.0  # 掃引ステップ間の待ち時間 [s]
 
-    # 表示
-    time_unit: str = "s"  # 時間の表示単位（s / ms / μs / ns）
-
     @property
     def period(self) -> float:
         """周期 [s] = 1 / frequency."""
@@ -93,9 +90,6 @@ class SweepConfig:
                 "frequency": self.frequency,
                 "period": self.period,
                 "trigger_delay": self.trigger_delay,
-            },
-            "display": {
-                "time_unit": self.time_unit,
             },
         }
         path = Path(path)

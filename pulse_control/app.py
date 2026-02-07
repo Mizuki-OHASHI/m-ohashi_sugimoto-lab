@@ -6,6 +6,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import tempfile
 from logging import getLogger
 
@@ -21,80 +22,85 @@ logger = getLogger(__name__)
 st.set_page_config(page_title="Pulse Width Sweep", layout="wide")
 
 # ================================================================== #
-#  Time units
+#  SI prefix parse / format
 # ================================================================== #
-UNIT_FACTORS: dict[str, float] = {
-    "s": 1.0,
-    "ms": 1e-3,
-    "μs": 1e-6,
-    "ns": 1e-9,
+_SI_PREFIXES: dict[str, float] = {
+    "n": 1e-9, "u": 1e-6, "μ": 1e-6, "m": 1e-3,
+    "k": 1e3, "M": 1e6,
 }
+_SI_PARSE_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)\s*([nuμmkM])?\s*$")
+
+# Ordered largest-first for formatting
+_FORMAT_PREFIXES = [(1e6, "M"), (1e3, "k"), (1, ""), (1e-3, "m"), (1e-6, "u"), (1e-9, "n")]
+
+
+def parse_si(text: str) -> float:
+    """Parse SI-prefixed string: '1n' → 1e-9, '10u' → 10e-6, '20k' → 20e3."""
+    m = _SI_PARSE_RE.match(text)
+    if not m:
+        raise ValueError(f"Invalid value: {text!r}")
+    num = float(m.group(1))
+    prefix = m.group(2)
+    if prefix:
+        num *= _SI_PREFIXES[prefix]
+    return num
+
+
+def format_si(value: float) -> str:
+    """Format to SI-prefixed string: 1e-9 → '1n', 0.02 → '20m', 20000 → '20k'."""
+    if value == 0:
+        return "0"
+    for factor, prefix in _FORMAT_PREFIXES:
+        scaled = value / factor
+        if abs(scaled) >= 1:
+            return f"{scaled:g}{prefix}"
+    # Fallback for extremely small values
+    factor, prefix = _FORMAT_PREFIXES[-1]
+    return f"{value / factor:g}{prefix}"
+
 
 # ================================================================== #
 #  Session initialisation
 # ================================================================== #
 if "config" not in st.session_state:
     st.session_state.config = SweepConfig()
-if "_frequency" not in st.session_state:
-    st.session_state._frequency = st.session_state.config.frequency
-if "_prev_time_unit" not in st.session_state:
-    st.session_state._prev_time_unit = "s"
 
 cfg: SweepConfig = st.session_state.config
 
 
 # ================================================================== #
-#  Callbacks: time-unit / frequency-period sync
+#  Callbacks: frequency ↔ period sync
 # ================================================================== #
-def _on_unit_change() -> None:
-    """Convert all time fields to the newly selected unit."""
-    new_unit = st.session_state._w_time_unit
-    old_unit = st.session_state._prev_time_unit
-    ratio = UNIT_FACTORS[old_unit] / UNIT_FACTORS[new_unit]
-    for key in ("_w_width_start", "_w_width_stop", "_w_width_step", "_w_wait_time"):
-        if key in st.session_state:
-            st.session_state[key] *= ratio
-    freq = st.session_state._frequency
-    if freq > 0 and "_w_period" in st.session_state:
-        st.session_state._w_period = (1.0 / freq) / UNIT_FACTORS[new_unit]
-    st.session_state._prev_time_unit = new_unit
-
-
 def _on_freq_change() -> None:
-    """Frequency changed → recalculate period."""
-    freq = st.session_state._w_freq
-    st.session_state._frequency = freq
-    f = UNIT_FACTORS[st.session_state.get("_w_time_unit", "s")]
-    if freq > 0 and "_w_period" in st.session_state:
-        st.session_state._w_period = (1.0 / freq) / f
+    """Frequency text changed → recalculate period."""
+    try:
+        freq = parse_si(st.session_state._w_freq)
+        if freq > 0:
+            st.session_state._w_period = format_si(1.0 / freq)
+    except ValueError:
+        pass
 
 
 def _on_period_change() -> None:
-    """Period changed → recalculate frequency."""
-    f = UNIT_FACTORS[st.session_state.get("_w_time_unit", "s")]
-    p = st.session_state._w_period
-    if p > 0:
-        freq = 1.0 / (p * f)
-        st.session_state._frequency = freq
-        if "_w_freq" in st.session_state:
-            st.session_state._w_freq = freq
+    """Period text changed → recalculate frequency."""
+    try:
+        period = parse_si(st.session_state._w_period)
+        if period > 0:
+            st.session_state._w_freq = format_si(1.0 / period)
+    except ValueError:
+        pass
 
 
 def _load_config_to_widgets(new_cfg: SweepConfig) -> None:
     """Push SweepConfig values into widget session state."""
-    unit = new_cfg.time_unit if new_cfg.time_unit in UNIT_FACTORS else "s"
-    f = UNIT_FACTORS[unit]
     st.session_state.config = new_cfg
-    st.session_state._frequency = new_cfg.frequency
-    st.session_state._w_time_unit = unit
-    st.session_state._prev_time_unit = unit
-    st.session_state._w_width_start = new_cfg.width_start / f
-    st.session_state._w_width_stop = new_cfg.width_stop / f
-    st.session_state._w_width_step = new_cfg.width_step / f
-    st.session_state._w_wait_time = new_cfg.wait_time / f
-    st.session_state._w_freq = new_cfg.frequency
+    st.session_state._w_width_start = format_si(new_cfg.width_start)
+    st.session_state._w_width_stop = format_si(new_cfg.width_stop)
+    st.session_state._w_width_step = format_si(new_cfg.width_step)
+    st.session_state._w_wait_time = format_si(new_cfg.wait_time)
+    st.session_state._w_freq = format_si(new_cfg.frequency)
     if new_cfg.frequency > 0:
-        st.session_state._w_period = (1.0 / new_cfg.frequency) / f
+        st.session_state._w_period = format_si(1.0 / new_cfg.frequency)
 
 
 # ================================================================== #
@@ -141,19 +147,11 @@ with st.sidebar:
             st.rerun()
 
 # ================================================================== #
-#  Time unit selector
-# ================================================================== #
-time_unit = st.radio(
-    "Time Unit", list(UNIT_FACTORS.keys()),
-    horizontal=True, index=0,
-    key="_w_time_unit", on_change=_on_unit_change,
-)
-factor = UNIT_FACTORS[time_unit]
-
-# ================================================================== #
 #  Main: parameter inputs
 # ================================================================== #
 col1, col2, col3 = st.columns(3)
+
+parse_errors: list[str] = []
 
 with col1:
     st.subheader("Pulse")
@@ -161,44 +159,37 @@ with col1:
     v_off = st.number_input("V_off [V]", value=cfg.v_off, format="%.4f")
     freq_col, period_col = st.columns(2)
     with freq_col:
-        st.number_input(
+        st.text_input(
             "Frequency [Hz]",
-            value=st.session_state._frequency,
-            format="%.4f", step=100.0,
+            value=format_si(cfg.frequency),
             key="_w_freq",
             on_change=_on_freq_change,
         )
     with period_col:
-        st.number_input(
-            f"Period [{time_unit}]",
-            value=(1.0 / st.session_state._frequency) / factor,
-            format="%.4f", step=1.0,
-            min_value=1e-9 / factor,
+        st.text_input(
+            "Period [s]",
+            value=format_si(1.0 / cfg.frequency),
             key="_w_period",
             on_change=_on_period_change,
         )
-    frequency = st.session_state._frequency
 
 with col2:
     st.subheader("Sweep Range")
-    st.number_input(
-        f"Width Start [{time_unit}]",
-        value=cfg.width_start / factor, format="%.4f", step=1.0,
+    st.text_input(
+        "Width Start [s]",
+        value=format_si(cfg.width_start),
         key="_w_width_start",
     )
-    st.number_input(
-        f"Width Stop [{time_unit}]",
-        value=cfg.width_stop / factor, format="%.4f", step=1.0,
+    st.text_input(
+        "Width Stop [s]",
+        value=format_si(cfg.width_stop),
         key="_w_width_stop",
     )
-    st.number_input(
-        f"Width Step [{time_unit}]",
-        value=cfg.width_step / factor, format="%.4f", step=1.0,
+    st.text_input(
+        "Width Step [s]",
+        value=format_si(cfg.width_step),
         key="_w_width_step",
     )
-    width_start = st.session_state._w_width_start * factor
-    width_stop = st.session_state._w_width_stop * factor
-    width_step = st.session_state._w_width_step * factor
 
 with col3:
     st.subheader("Trigger")
@@ -208,29 +199,52 @@ with col3:
     )
 
     st.subheader("Sweep Control")
-    st.number_input(
-        f"Wait Time [{time_unit}]",
-        value=cfg.wait_time / factor, format="%.4f", step=1.0,
+    st.text_input(
+        "Wait Time [s]",
+        value=format_si(cfg.wait_time),
         key="_w_wait_time",
     )
-    wait_time = st.session_state._w_wait_time * factor
+
+# ------------------------------------------------------------------ #
+#  Parse SI text fields
+# ------------------------------------------------------------------ #
+_SI_FIELDS = {
+    "frequency": "_w_freq",
+    "width_start": "_w_width_start",
+    "width_stop": "_w_width_stop",
+    "width_step": "_w_width_step",
+    "wait_time": "_w_wait_time",
+}
+
+parsed: dict[str, float] = {}
+for name, key in _SI_FIELDS.items():
+    try:
+        parsed[name] = parse_si(st.session_state[key])
+    except (ValueError, KeyError):
+        parse_errors.append(f"{name}: invalid value \"{st.session_state.get(key, '')}\"")
+
+try:
+    parsed["period"] = parse_si(st.session_state["_w_period"])
+except (ValueError, KeyError):
+    parse_errors.append(f"period: invalid value \"{st.session_state.get('_w_period', '')}\"")
 
 
 # ------------------------------------------------------------------ #
 #  Build SweepConfig from UI values
 # ------------------------------------------------------------------ #
-def _build_config_from_ui() -> SweepConfig:
+def _build_config_from_ui() -> SweepConfig | None:
+    if parse_errors:
+        return None
     return SweepConfig(
         visa_address=visa_address,
         v_on=v_on,
         v_off=v_off,
-        width_start=width_start,
-        width_stop=width_stop,
-        width_step=width_step,
-        frequency=frequency,
+        width_start=parsed["width_start"],
+        width_stop=parsed["width_stop"],
+        width_step=parsed["width_step"],
+        frequency=parsed["frequency"],
         trigger_delay=int(trigger_delay),
-        wait_time=wait_time,
-        time_unit=time_unit,
+        wait_time=parsed["wait_time"],
     )
 
 
@@ -238,23 +252,25 @@ def _build_config_from_ui() -> SweepConfig:
 #  TOML export
 # ================================================================== #
 with st.sidebar:
-    export_config = _build_config_from_ui()
-    with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
-        export_config.to_toml(tmp.name)
-        with open(tmp.name) as f:
-            toml_str = f.read()
-    st.download_button(
-        "Export TOML",
-        data=toml_str,
-        file_name="sweep_config.toml",
-        mime="text/plain",
-    )
+    config_or_none = _build_config_from_ui()
+    if config_or_none is not None:
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
+            config_or_none.to_toml(tmp.name)
+            with open(tmp.name) as f:
+                toml_str = f.read()
+        st.download_button(
+            "Export TOML",
+            data=toml_str,
+            file_name="sweep_config.toml",
+            mime="text/plain",
+        )
 
 # ================================================================== #
 #  Validation
 # ================================================================== #
-current_config = _build_config_from_ui()
-errors = current_config.validate()
+errors = list(parse_errors)
+if config_or_none is not None:
+    errors.extend(config_or_none.validate())
 
 st.divider()
 if errors:

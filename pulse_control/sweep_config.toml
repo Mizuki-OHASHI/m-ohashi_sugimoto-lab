@@ -1,22 +1,17 @@
 [connection]
-visa_address = "TCPIP0::192.168.1.1::inst0::INSTR"  # M96 PXI SMU の VISA アドレス (TODO: 実際のアドレスに変更)
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"  # Agilent 81180A VISA address
 
 [pulse]
-v_on = 0.5    # パルスON時の電圧 [V]
-v_off = 0.0   # パルスOFF時の電圧（ベース） [V]
+v_on = 0.0    # Voltage during pulse ON [V]
+v_off = -1.0  # Voltage during pulse OFF (base) [V]
 
 [sweep]
-center_delay = 0.005  # パルス中心のトリガーからの遅延 [s]
-width_start = 0.001   # パルス幅の開始値 [s]
-width_stop = 0.005    # パルス幅の終了値 [s]
-width_step = 0.001    # パルス幅のステップ [s]
+width_start = 1e-8   # Pulse width start [s] (10 ns)
+width_stop = 5e-8    # Pulse width stop [s] (50 ns)
+width_step = 5e-9    # Pulse width step [s] (5 ns)
+wait_time = 1.0      # Wait time between sweep steps [s]
 
-[measurement]
-trigger_count = 2        # トリガー回数（各幅での繰り返し数）
-trigger_time = 0.01      # トリガー間隔 [s]
-aperture_time = 0.0001   # アパーチャ時間 [s]
-sampling_points = 20     # サンプリング点数
-compliance_current = 0.1 # コンプライアンス電流 [A]
-
-[output]
-output_dir = "results"   # CSV 保存先ディレクトリ
+[awg]
+frequency = 10000000.0  # Repetition frequency [Hz] (10 MHz)
+period = 1e-7           # Period [s] (= 1/frequency)
+trigger_delay = 0       # Trigger delay [sample points] (multiple of 8)
