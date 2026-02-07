@@ -1,4 +1,4 @@
-"""パルス幅掃引 Streamlit UI（Agilent 81180A AWG 用）.
+"""Pulse Width Sweep Streamlit UI (Agilent 81180A AWG).
 
 Usage:
     streamlit run pulse_control/app.py
@@ -21,7 +21,7 @@ logger = getLogger(__name__)
 st.set_page_config(page_title="Pulse Width Sweep", layout="wide")
 
 # ================================================================== #
-#  時間単位
+#  Time units
 # ================================================================== #
 UNIT_FACTORS: dict[str, float] = {
     "s": 1.0,
@@ -31,7 +31,7 @@ UNIT_FACTORS: dict[str, float] = {
 }
 
 # ================================================================== #
-#  セッション初期化
+#  Session initialisation
 # ================================================================== #
 if "config" not in st.session_state:
     st.session_state.config = SweepConfig()
@@ -44,10 +44,10 @@ cfg: SweepConfig = st.session_state.config
 
 
 # ================================================================== #
-#  コールバック: 時間単位・周波数/周期の相互同期
+#  Callbacks: time-unit / frequency-period sync
 # ================================================================== #
 def _on_unit_change() -> None:
-    """時間単位変更 → 全時間フィールドの表示値を新しい単位に変換."""
+    """Convert all time fields to the newly selected unit."""
     new_unit = st.session_state._w_time_unit
     old_unit = st.session_state._prev_time_unit
     ratio = UNIT_FACTORS[old_unit] / UNIT_FACTORS[new_unit]
@@ -61,7 +61,7 @@ def _on_unit_change() -> None:
 
 
 def _on_freq_change() -> None:
-    """周波数入力 → 周期を再計算."""
+    """Frequency changed → recalculate period."""
     freq = st.session_state._w_freq
     st.session_state._frequency = freq
     f = UNIT_FACTORS[st.session_state.get("_w_time_unit", "s")]
@@ -70,7 +70,7 @@ def _on_freq_change() -> None:
 
 
 def _on_period_change() -> None:
-    """周期入力 → 周波数を再計算."""
+    """Period changed → recalculate frequency."""
     f = UNIT_FACTORS[st.session_state.get("_w_time_unit", "s")]
     p = st.session_state._w_period
     if p > 0:
@@ -81,8 +81,7 @@ def _on_period_change() -> None:
 
 
 def _load_config_to_widgets(new_cfg: SweepConfig) -> None:
-    """SweepConfig の値をウィジェットの session state に反映する."""
-    # TOML に時間単位が含まれていればそれを使い、なければ現在の単位を維持
+    """Push SweepConfig values into widget session state."""
     unit = new_cfg.time_unit if new_cfg.time_unit in UNIT_FACTORS else "s"
     f = UNIT_FACTORS[unit]
     st.session_state.config = new_cfg
@@ -99,34 +98,38 @@ def _load_config_to_widgets(new_cfg: SweepConfig) -> None:
 
 
 # ================================================================== #
-#  サイドバー: タイトル + 接続 + TOML インポート/エクスポート
+#  Sidebar: title + connection + TOML import/export
 # ================================================================== #
 with st.sidebar:
     st.header("Pulse Width Sweep")
     st.caption("Agilent 81180A AWG")
 
     st.divider()
-    st.subheader("接続")
-    visa_address = st.text_input("VISA アドレス", value=cfg.visa_address)
-    if st.button("デフォルトに戻す"):
-        cfg.visa_address = DEFAULT_VISA_ADDRESS
-        st.rerun()
+    st.markdown("**Connection**")
+    visa_address = st.text_input("VISA Address", value=cfg.visa_address)
 
-    if st.button("接続チェック"):
-        with st.spinner("接続中..."):
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("Reset", use_container_width=True):
+            cfg.visa_address = DEFAULT_VISA_ADDRESS
+            st.rerun()
+    with btn_col2:
+        check_conn = st.button("Check", use_container_width=True)
+
+    if check_conn:
+        with st.spinner("Connecting..."):
             try:
                 idn = PulseInstrument.check_connection(visa_address)
                 st.success(f"OK: {idn}")
-                logger.info("接続チェック成功: %s", idn)
+                logger.info("Connection check OK: %s", idn)
             except Exception as exc:
-                st.error(f"接続失敗: {exc}")
-                logger.error("接続チェック失敗: %s", exc)
+                st.error(f"Failed: {exc}")
+                logger.error("Connection check failed: %s", exc)
 
     st.divider()
-    st.subheader("TOML 設定")
+    st.markdown("**TOML Config**")
 
-    # インポート
-    uploaded = st.file_uploader("TOML インポート", type=["toml"])
+    uploaded = st.file_uploader("Import TOML", type=["toml"])
     if uploaded is not None:
         upload_id = f"{uploaded.name}_{uploaded.size}"
         if st.session_state.get("_last_upload_id") != upload_id:
@@ -138,51 +141,28 @@ with st.sidebar:
             st.rerun()
 
 # ================================================================== #
-#  時間単位セレクタ
+#  Time unit selector
 # ================================================================== #
 time_unit = st.radio(
-    "時間の表示単位", list(UNIT_FACTORS.keys()),
+    "Time Unit", list(UNIT_FACTORS.keys()),
     horizontal=True, index=0,
     key="_w_time_unit", on_change=_on_unit_change,
 )
 factor = UNIT_FACTORS[time_unit]
 
 # ================================================================== #
-#  メイン: パラメータ入力
+#  Main: parameter inputs
 # ================================================================== #
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.subheader("パルス形状")
+    st.subheader("Pulse")
     v_on = st.number_input("V_on [V]", value=cfg.v_on, format="%.4f")
     v_off = st.number_input("V_off [V]", value=cfg.v_off, format="%.4f")
-
-    st.subheader("掃引パラメータ")
-    st.number_input(
-        f"width_start [{time_unit}]",
-        value=cfg.width_start / factor, format="%.4f", step=1.0,
-        key="_w_width_start",
-    )
-    st.number_input(
-        f"width_stop [{time_unit}]",
-        value=cfg.width_stop / factor, format="%.4f", step=1.0,
-        key="_w_width_stop",
-    )
-    st.number_input(
-        f"width_step [{time_unit}]",
-        value=cfg.width_step / factor, format="%.4f", step=1.0,
-        key="_w_width_step",
-    )
-    width_start = st.session_state._w_width_start * factor
-    width_stop = st.session_state._w_width_stop * factor
-    width_step = st.session_state._w_width_step * factor
-
-with col2:
-    st.subheader("信号生成")
     freq_col, period_col = st.columns(2)
     with freq_col:
         st.number_input(
-            "frequency [Hz]",
+            "Frequency [Hz]",
             value=st.session_state._frequency,
             format="%.4f", step=100.0,
             key="_w_freq",
@@ -190,7 +170,7 @@ with col2:
         )
     with period_col:
         st.number_input(
-            f"period [{time_unit}]",
+            f"Period [{time_unit}]",
             value=(1.0 / st.session_state._frequency) / factor,
             format="%.4f", step=1.0,
             min_value=1e-9 / factor,
@@ -199,15 +179,37 @@ with col2:
         )
     frequency = st.session_state._frequency
 
-    st.subheader("トリガー")
+with col2:
+    st.subheader("Sweep Range")
+    st.number_input(
+        f"Width Start [{time_unit}]",
+        value=cfg.width_start / factor, format="%.4f", step=1.0,
+        key="_w_width_start",
+    )
+    st.number_input(
+        f"Width Stop [{time_unit}]",
+        value=cfg.width_stop / factor, format="%.4f", step=1.0,
+        key="_w_width_stop",
+    )
+    st.number_input(
+        f"Width Step [{time_unit}]",
+        value=cfg.width_step / factor, format="%.4f", step=1.0,
+        key="_w_width_step",
+    )
+    width_start = st.session_state._w_width_start * factor
+    width_stop = st.session_state._w_width_stop * factor
+    width_step = st.session_state._w_width_step * factor
+
+with col3:
+    st.subheader("Trigger")
     trigger_delay = st.number_input(
-        "trigger_delay [points]（8 の倍数）",
+        "Trigger Delay [points] (multiple of 8)",
         value=cfg.trigger_delay, min_value=0, step=8,
     )
 
-    st.subheader("掃引制御")
+    st.subheader("Sweep Control")
     st.number_input(
-        f"wait_time [{time_unit}]",
+        f"Wait Time [{time_unit}]",
         value=cfg.wait_time / factor, format="%.4f", step=1.0,
         key="_w_wait_time",
     )
@@ -215,7 +217,7 @@ with col2:
 
 
 # ------------------------------------------------------------------ #
-#  UI の値から SweepConfig を構築するヘルパー
+#  Build SweepConfig from UI values
 # ------------------------------------------------------------------ #
 def _build_config_from_ui() -> SweepConfig:
     return SweepConfig(
@@ -233,7 +235,7 @@ def _build_config_from_ui() -> SweepConfig:
 
 
 # ================================================================== #
-#  TOML エクスポート
+#  TOML export
 # ================================================================== #
 with st.sidebar:
     export_config = _build_config_from_ui()
@@ -242,50 +244,49 @@ with st.sidebar:
         with open(tmp.name) as f:
             toml_str = f.read()
     st.download_button(
-        "TOML エクスポート",
+        "Export TOML",
         data=toml_str,
         file_name="sweep_config.toml",
         mime="text/plain",
     )
 
 # ================================================================== #
-#  バリデーション
+#  Validation
 # ================================================================== #
 current_config = _build_config_from_ui()
 errors = current_config.validate()
 
 st.divider()
 if errors:
-    msg = "設定エラー:\n" + "\n".join(f"- {e}" for e in errors)
+    msg = "Configuration error:\n" + "\n".join(f"- {e}" for e in errors)
     st.error(msg)
 else:
-    st.success("パラメータ OK")
+    st.success("Parameters OK")
 
 # ================================================================== #
-#  実行
+#  Run sweep
 # ================================================================== #
-st.divider()
-if st.button("掃引開始", disabled=bool(errors) or not visa_address):
+if st.button("Start Sweep", disabled=bool(errors) or not visa_address, type="primary"):
     config = _build_config_from_ui()
-    logger.info("掃引開始")
-    progress = st.progress(0, text="接続中...")
+    logger.info("Sweep started")
+    progress = st.progress(0, text="Connecting...")
 
     try:
         instrument = PulseInstrument(config.visa_address)
-        progress.progress(0, text="装置セットアップ中...")
+        progress.progress(0, text="Setting up instrument...")
         instrument.setup(config)
 
         def on_step(i: int, total: int) -> None:
             pct = (i + 1) / total
-            progress.progress(pct, text=f"掃引中... {i + 1}/{total}")
+            progress.progress(pct, text=f"Sweeping... {i + 1}/{total}")
 
         run_sweep(config, instrument, callback=on_step)
         instrument.teardown()
         instrument.close()
 
-        progress.progress(1.0, text="完了!")
-        logger.info("掃引完了")
+        progress.progress(1.0, text="Done!")
+        logger.info("Sweep completed")
 
     except Exception as exc:
-        st.error(f"エラー: {exc}")
-        logger.exception("掃引中にエラー発生")
+        st.error(f"Error: {exc}")
+        logger.exception("Error during sweep")
