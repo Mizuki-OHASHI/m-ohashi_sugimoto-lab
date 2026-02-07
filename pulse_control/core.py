@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from logging import getLogger
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,6 +11,8 @@ import numpy as np
 import pyvisa
 
 from config import SweepConfig
+
+logger = getLogger(__name__)
 
 
 class PulseInstrument:
@@ -21,7 +24,20 @@ class PulseInstrument:
         self.instr.read_termination = "\n"
         self.instr.write_termination = "\n"
         self.idn = self.instr.query("*IDN?")
-        print(f"接続: {self.idn}")
+        logger.info("接続: %s", self.idn)
+
+    # ------------------------------------------------------------------ #
+    #  SCPI ラッパー（debug ログ付き）
+    # ------------------------------------------------------------------ #
+    def _write(self, cmd: str) -> None:
+        logger.debug("SCPI write: %s", cmd)
+        self.instr.write(cmd)
+
+    def _query(self, cmd: str) -> str:
+        logger.debug("SCPI query: %s", cmd)
+        resp = self.instr.query(cmd)
+        logger.debug("SCPI response: %s", resp)
+        return resp
 
     def close(self) -> None:
         self.instr.close()
@@ -29,14 +45,19 @@ class PulseInstrument:
     @staticmethod
     def check_connection(visa_address: str) -> str:
         """接続チェック. 成功時は *IDN? の応答を返す. 失敗時は例外を送出."""
+        logger.info("接続チェック: %s", visa_address)
         rm = pyvisa.ResourceManager("@py")
         instr = rm.open_resource(visa_address)
         instr.read_termination = "\n"
         instr.write_termination = "\n"
         try:
             idn = instr.query("*IDN?")
+        except Exception:
+            logger.exception("接続チェック失敗: %s", visa_address)
+            raise
         finally:
             instr.close()
+        logger.info("接続チェック成功: %s", idn)
         return idn
 
     # ------------------------------------------------------------------ #
@@ -44,8 +65,9 @@ class PulseInstrument:
     # ------------------------------------------------------------------ #
     def setup(self, config: SweepConfig) -> None:
         """装置の初期設定（パルスモード、測定レンジ、サンプリングモード等）."""
-        w = self.instr.write
-        q = self.instr.query
+        logger.info("装置セットアップ開始")
+        w = self._write
+        q = self._query
 
         q("SYST:ERR:COUN?")
         w("*CLS")
@@ -130,8 +152,9 @@ class PulseInstrument:
         config: SweepConfig,
     ) -> dict[str, Any]:
         """単一パルス幅での測定を実行し結果を返す."""
-        w = self.instr.write
-        q = self.instr.query
+        logger.debug("measure_single: width=%.6f s, delay=%.6f s", pulse_width, pulse_delay)
+        w = self._write
+        q = self._query
 
         # パルス幅・遅延を設定
         w(f"SOUR1:PULS:WIDT {pulse_width}")
@@ -174,7 +197,8 @@ class PulseInstrument:
     # ------------------------------------------------------------------ #
     def teardown(self) -> None:
         """測定終了処理（出力を安全な状態に戻す）."""
-        w = self.instr.write
+        logger.info("装置ティアダウン開始")
+        w = self._write
         w("SOUR1:VOLT 0.0")
         w("SOUR1:CURR 0.0")
         w("SENS1:VOLT:PROT 100e-6")
@@ -208,7 +232,7 @@ def run_sweep(
 
     for i, width in enumerate(widths):
         pulse_delay = config.center_delay - width / 2
-        print(f"  [{i + 1}/{total}] width={width:.6f} s, delay={pulse_delay:.6f} s")
+        logger.info("[%d/%d] width=%.6f s, delay=%.6f s", i + 1, total, width, pulse_delay)
 
         result = instrument.measure_single(width, pulse_delay, config)
         results.append(result)
@@ -253,8 +277,8 @@ def save_results(
             ):
                 writer.writerow([t, v, c, sv])
 
-        print(f"  保存: {filepath}")
+        logger.info("保存: %s", filepath)
 
     # 設定も保存
     config.to_toml(out / "config.toml")
-    print(f"  設定保存: {out / 'config.toml'}")
+    logger.info("設定保存: %s", out / "config.toml")

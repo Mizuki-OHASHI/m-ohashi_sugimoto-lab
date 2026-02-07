@@ -7,12 +7,17 @@ Usage:
 from __future__ import annotations
 
 import tempfile
+from logging import getLogger
 
 import matplotlib.pyplot as plt
 import streamlit as st
 
 from config import DEFAULT_VISA_ADDRESS, SweepConfig
 from core import PulseInstrument, run_sweep, save_results
+from log_setup import setup_logging
+
+setup_logging()
+logger = getLogger(__name__)
 
 st.set_page_config(page_title="Pulse Width Sweep", layout="wide")
 
@@ -43,8 +48,10 @@ with st.sidebar:
             try:
                 idn = PulseInstrument.check_connection(visa_address)
                 st.success(f"OK: {idn}")
+                logger.info("接続チェック成功: %s", idn)
             except Exception as exc:
                 st.error(f"接続失敗: {exc}")
+                logger.error("接続チェック失敗: %s", exc)
 
     st.divider()
     st.subheader("TOML 設定")
@@ -164,6 +171,7 @@ else:
 st.divider()
 if st.button("掃引開始", disabled=bool(errors) or not visa_address):
     config = _build_config_from_ui()
+    logger.info("掃引開始")
     progress = st.progress(0, text="接続中...")
 
     try:
@@ -182,11 +190,13 @@ if st.button("掃引開始", disabled=bool(errors) or not visa_address):
         progress.progress(1.0, text="保存中...")
         save_results(results, config, config.output_dir)
         progress.progress(1.0, text="完了!")
+        logger.info("掃引完了: %d 件の結果を %s に保存", len(results), config.output_dir)
 
         st.session_state.results = results
 
     except Exception as exc:
         st.error(f"エラー: {exc}")
+        logger.exception("掃引中にエラー発生")
 
 # ================================================================== #
 #  結果プロット

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from logging import getLogger
 from pathlib import Path
 
 import toml
+
+logger = getLogger(__name__)
 
 
 DEFAULT_VISA_ADDRESS = "TCPIP0::192.168.0.251::5025::SOCKET"
@@ -44,6 +47,7 @@ class SweepConfig:
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
         """TOML ファイルから設定を読み込む."""
+        logger.info("TOML 読み込み: %s", path)
         data = toml.load(path)
         # フラットに展開（セクション付き TOML に対応）
         flat: dict = {}
@@ -59,6 +63,7 @@ class SweepConfig:
 
     def to_toml(self, path: str | Path) -> None:
         """TOML ファイルへ書き出す."""
+        logger.info("TOML 書き出し: %s", path)
         data = {
             "connection": {
                 "visa_address": self.visa_address,
@@ -91,6 +96,7 @@ class SweepConfig:
 
     def validate(self) -> list[str]:
         """パラメータの整合性チェック. エラーメッセージのリストを返す（空なら OK）."""
+        logger.info("バリデーション実行")
         errors: list[str] = []
 
         width_max = max(self.width_start, self.width_stop)
@@ -123,5 +129,8 @@ class SweepConfig:
             errors.append("sampling_points は 1 以上でなければなりません")
         if self.compliance_current <= 0:
             errors.append("compliance_current は正の値でなければなりません")
+
+        for e in errors:
+            logger.warning("バリデーションエラー: %s", e)
 
         return errors

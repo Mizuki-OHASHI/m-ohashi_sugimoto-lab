@@ -7,13 +7,19 @@ Usage:
 from __future__ import annotations
 
 import sys
+from logging import getLogger
 from pathlib import Path
 
 from config import SweepConfig
 from core import PulseInstrument, run_sweep, save_results
+from log_setup import setup_logging
+
+logger = getLogger(__name__)
 
 
 def main(config_path: str | None = None) -> None:
+    setup_logging()
+
     # 設定ファイルのパス
     if config_path is None:
         if len(sys.argv) > 1:
@@ -21,36 +27,37 @@ def main(config_path: str | None = None) -> None:
         else:
             config_path = str(Path(__file__).parent / "sweep_config.toml")
 
-    print(f"設定ファイル: {config_path}")
+    logger.info("設定ファイル: %s", config_path)
     config = SweepConfig.from_toml(config_path)
 
     # バリデーション
     errors = config.validate()
     if errors:
-        print("設定エラー:")
+        logger.error("設定エラー:")
         for e in errors:
-            print(f"  - {e}")
+            logger.error("  - %s", e)
         sys.exit(1)
 
-    print("設定OK.")
-    print(f"  VISA: {config.visa_address}")
-    print(f"  V_on={config.v_on} V, V_off={config.v_off} V")
-    print(
-        f"  幅: {config.width_start} → {config.width_stop} (step {config.width_step}) s"
+    logger.info("設定OK.")
+    logger.info("  VISA: %s", config.visa_address)
+    logger.info("  V_on=%s V, V_off=%s V", config.v_on, config.v_off)
+    logger.info(
+        "  幅: %s → %s (step %s) s",
+        config.width_start, config.width_stop, config.width_step,
     )
-    print(f"  center_delay={config.center_delay} s")
+    logger.info("  center_delay=%s s", config.center_delay)
 
     # 接続チェック
-    print("接続チェック中...")
+    logger.info("接続チェック中...")
     try:
         idn = PulseInstrument.check_connection(config.visa_address)
-        print(f"  OK: {idn}")
+        logger.info("  OK: %s", idn)
     except Exception as exc:
-        print(f"  接続失敗: {exc}")
+        logger.exception("接続失敗: %s", exc)
         sys.exit(1)
 
     # 装置接続・実行
-    print("掃引を開始します...")
+    logger.info("掃引を開始します...")
     instrument = PulseInstrument(config.visa_address)
     try:
         instrument.setup(config)
@@ -61,7 +68,7 @@ def main(config_path: str | None = None) -> None:
 
     # 結果保存
     save_results(results, config, config.output_dir)
-    print(f"完了. 結果は {config.output_dir}/ に保存されました.")
+    logger.info("完了. 結果は %s/ に保存されました.", config.output_dir)
 
 
 if __name__ == "__main__":
