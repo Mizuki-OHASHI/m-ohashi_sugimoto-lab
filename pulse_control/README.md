@@ -13,6 +13,14 @@
 
 ## セットアップ
 
+### Keysight IO Libraries Suite のインストール
+
+VISA 通信に必要な **Keysight IO Libraries Suite** を事前にインストールしてください。
+
+1. [IO Libraries Suite Downloads](https://www.keysight.com/us/en/lib/software-detail/computer-software/io-libraries-suite-downloads-2175637.html) にアクセス
+2. **「Download Windows x64 IOLS」** をクリックしてダウンロード
+3. ダウンロードしたインストーラーを実行してインストール
+
 ### Windows
 
 ```powershell

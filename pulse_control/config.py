@@ -8,7 +8,10 @@ from pathlib import Path
 import toml
 
 
-DEFAULT_VISA_ADDRESS = "TCPIP0::192.168.1.1::inst0::INSTR"  # TODO: 実際のアドレスに変更
+DEFAULT_VISA_ADDRESS = "TCPIP0::192.168.0.251::5025::SOCKET"
+# NOTE: TCPIP0::[IPアドレス]::5025::SOCKET の形式で指定
+# - IPアドレスは装置の Utility > Remote Interface > LAN で確認
+# - LAN が繋がっているかを確認したい場合には PowerShell で ping [IPアドレス] を実行
 
 
 @dataclass
