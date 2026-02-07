@@ -1,15 +1,19 @@
-# Pulse Width Sweep — Keysight M96 PXI SMU
+# Pulse Width Sweep — Agilent 81180A AWG
 
-パルス幅を掃引しながら電圧・電流を測定するツール。
-パルスの中心位置 (`center_delay`) を固定し、幅を変えても中心が動かないように制御する。
+パルス幅（Duty Cycle）を掃引して Agilent 81180A Arbitrary Waveform Generator を制御するツール。
+Square モードで周波数を固定し、Duty 可変でパルス幅を制御する。
+
+## ドキュメント
+
+- [81180A Arbitrary Waveform Generator User's Guide (Keysight)](https://www.keysight.com/us/en/assets/9018-03346/user-manuals/9018-03346.pdf)
 
 ## 動作環境
 
 - **Windows** / **Linux** / **Mac**
 - Python 3.10+
-- Keysight M96 PXI SMU + TCP/IP 接続
+- Agilent 81180A AWG + TCP/IP 接続
 
-> VISA バックエンドに `pyvisa-py`（純粋 Python 実装）を使用するため、Keysight IO Libraries Suite のインストールは不要です。
+> VISA バックエンドに `pyvisa-py` を使用するため、Keysight IO Libraries Suite のインストールは不要です。
 
 ## セットアップ
 
@@ -47,14 +51,14 @@ python -m pulse_control sweep_config.toml
 streamlit run pulse_control/app.py
 ```
 
-ブラウザで UI が開き、パラメータ入力・TOML インポート/エクスポート・掃引実行・結果プロットが可能。
+ブラウザで UI が開き、パラメータ入力・TOML インポート/エクスポート・掃引実行が可能。
 
 ## ファイル構成
 
 ```
 pulse_control/
 ├── config.py          # 設定 dataclass, TOML 読み書き, バリデーション
-├── core.py            # 装置通信 (PulseInstrument) + 掃引ロジック + データ保存
+├── core.py            # 装置通信 (PulseInstrument) + 掃引ロジック
 ├── main.py            # CLI エントリポイント
 ├── app.py             # Streamlit UI
 ├── sweep_config.toml  # 設定テンプレート
@@ -65,16 +69,12 @@ pulse_control/
 
 | パラメータ | 説明 |
 |---|---|
-| `visa_address` | M96 の VISA アドレス |
+| `visa_address` | 81180A の VISA アドレス |
 | `v_on` / `v_off` | パルス ON/OFF 電圧 [V] |
-| `center_delay` | パルス中心のトリガーからの遅延 [s] |
 | `width_start` / `width_stop` / `width_step` | パルス幅の掃引範囲とステップ [s] |
-| `trigger_count` | 各幅でのトリガー繰り返し数 |
-| `trigger_time` | トリガー間隔 [s] |
-| `aperture_time` | アパーチャ時間 [s] |
-| `sampling_points` | サンプリング点数 |
-| `compliance_current` | コンプライアンス電流 [A] |
-| `output_dir` | CSV 保存先ディレクトリ |
+| `frequency` / `period` | 周波数 [Hz] または 周期 [s]（TOML でどちらでも指定可） |
+| `trigger_delay` | トリガー遅延 [サンプルポイント数]（8 の倍数） |
+| `wait_time` | 掃引ステップ間の待ち時間 [s] |
 
 ## Lint / Format
 

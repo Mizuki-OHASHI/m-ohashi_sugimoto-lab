@@ -1,4 +1,4 @@
-"""パルス幅掃引 Streamlit UI.
+"""パルス幅掃引 Streamlit UI（Agilent 81180A AWG 用）.
 
 Usage:
     streamlit run pulse_control/app.py
@@ -9,11 +9,10 @@ from __future__ import annotations
 import tempfile
 from logging import getLogger
 
-import matplotlib.pyplot as plt
 import streamlit as st
 
 from config import DEFAULT_VISA_ADDRESS, SweepConfig
-from core import PulseInstrument, run_sweep, save_results
+from core import PulseInstrument, run_sweep
 from log_setup import setup_logging
 
 setup_logging()
@@ -34,7 +33,7 @@ cfg: SweepConfig = st.session_state.config
 # ================================================================== #
 with st.sidebar:
     st.header("Pulse Width Sweep")
-    st.caption("Keysight M96 PXI SMU")
+    st.caption("Agilent 81180A AWG")
 
     st.divider()
     st.subheader("接続")
@@ -76,9 +75,6 @@ with col1:
     v_off = st.number_input("V_off [V]", value=cfg.v_off, format="%.4f")
 
     st.subheader("掃引パラメータ")
-    center_delay = st.number_input(
-        "center_delay [s]", value=cfg.center_delay, format="%.6f", step=0.001
-    )
     width_start = st.number_input(
         "width_start [s]", value=cfg.width_start, format="%.6f", step=0.001
     )
@@ -90,28 +86,31 @@ with col1:
     )
 
 with col2:
-    st.subheader("測定パラメータ")
-    trigger_count = st.number_input(
-        "trigger_count", value=cfg.trigger_count, min_value=1, step=1
+    st.subheader("信号生成")
+    freq_mode = st.radio(
+        "周波数の入力方法", ["周波数 [Hz]", "周期 [s]"], horizontal=True
     )
-    trigger_time = st.number_input(
-        "trigger_time [s]", value=cfg.trigger_time, format="%.6f", step=0.001
-    )
-    aperture_time = st.number_input(
-        "aperture_time [s]", value=cfg.aperture_time, format="%.6f", step=0.0001
-    )
-    sampling_points = st.number_input(
-        "sampling_points", value=cfg.sampling_points, min_value=1, step=1
-    )
-    compliance_current = st.number_input(
-        "compliance_current [A]",
-        value=cfg.compliance_current,
-        format="%.4f",
-        step=0.01,
+    if freq_mode == "周波数 [Hz]":
+        frequency = st.number_input(
+            "frequency [Hz]", value=cfg.frequency, format="%.1f", step=100.0
+        )
+    else:
+        period_val = st.number_input(
+            "period [s]", value=cfg.period, format="%.6f",
+            step=0.0001, min_value=1e-9,
+        )
+        frequency = 1.0 / period_val
+
+    st.subheader("トリガー")
+    trigger_delay = st.number_input(
+        "trigger_delay [points]（8 の倍数）",
+        value=cfg.trigger_delay, min_value=0, step=8,
     )
 
-    st.subheader("出力")
-    output_dir = st.text_input("output_dir", value=cfg.output_dir)
+    st.subheader("掃引制御")
+    wait_time = st.number_input(
+        "wait_time [s]", value=cfg.wait_time, format="%.2f", step=0.1
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -122,16 +121,12 @@ def _build_config_from_ui() -> SweepConfig:
         visa_address=visa_address,
         v_on=v_on,
         v_off=v_off,
-        center_delay=center_delay,
         width_start=width_start,
         width_stop=width_stop,
         width_step=width_step,
-        trigger_count=int(trigger_count),
-        trigger_time=trigger_time,
-        aperture_time=aperture_time,
-        sampling_points=int(sampling_points),
-        compliance_current=compliance_current,
-        output_dir=output_dir,
+        frequency=frequency,
+        trigger_delay=int(trigger_delay),
+        wait_time=wait_time,
     )
 
 
@@ -159,9 +154,8 @@ errors = current_config.validate()
 
 st.divider()
 if errors:
-    st.error("設定エラー:")
-    for e in errors:
-        st.write(f"- {e}")
+    msg = "設定エラー:\n" + "\n".join(f"- {e}" for e in errors)
+    st.error(msg)
 else:
     st.success("パラメータ OK")
 
@@ -179,48 +173,17 @@ if st.button("掃引開始", disabled=bool(errors) or not visa_address):
         progress.progress(0, text="装置セットアップ中...")
         instrument.setup(config)
 
-        def on_step(i: int, total: int, _result: dict) -> None:
+        def on_step(i: int, total: int) -> None:
             pct = (i + 1) / total
-            progress.progress(pct, text=f"測定中... {i + 1}/{total}")
+            progress.progress(pct, text=f"掃引中... {i + 1}/{total}")
 
-        results = run_sweep(config, instrument, callback=on_step)
+        run_sweep(config, instrument, callback=on_step)
         instrument.teardown()
         instrument.close()
 
-        progress.progress(1.0, text="保存中...")
-        save_results(results, config, config.output_dir)
         progress.progress(1.0, text="完了!")
-        logger.info("掃引完了: %d 件の結果を %s に保存", len(results), config.output_dir)
-
-        st.session_state.results = results
+        logger.info("掃引完了")
 
     except Exception as exc:
         st.error(f"エラー: {exc}")
         logger.exception("掃引中にエラー発生")
-
-# ================================================================== #
-#  結果プロット
-# ================================================================== #
-if "results" in st.session_state:
-    st.divider()
-    st.subheader("結果")
-
-    results = st.session_state.results
-
-    for result in results:
-        w = result["pulse_width"]
-        fig, ax1 = plt.subplots(figsize=(8, 3))
-        ax1.set_title(f"Pulse width = {w * 1e6:.1f} us")
-        ax1.set_xlabel("Time [s]")
-        ax1.set_ylabel("Voltage [V]", color="tab:blue")
-        ax1.plot(result["timestamps"], result["voltage"], color="tab:blue", label="V")
-        ax1.tick_params(axis="y", labelcolor="tab:blue")
-
-        ax2 = ax1.twinx()
-        ax2.set_ylabel("Current [A]", color="tab:red")
-        ax2.plot(result["timestamps"], result["current"], color="tab:red", label="I")
-        ax2.tick_params(axis="y", labelcolor="tab:red")
-
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)

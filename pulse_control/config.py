@@ -1,4 +1,4 @@
-"""パルス幅掃引の設定管理モジュール."""
+"""パルス幅掃引の設定管理モジュール（Agilent 81180A AWG 用）."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ DEFAULT_VISA_ADDRESS = "TCPIP0::192.168.0.251::5025::SOCKET"
 
 @dataclass
 class SweepConfig:
-    """パルス幅掃引の設定."""
+    """パルス幅掃引の設定（Agilent 81180A AWG 用）."""
 
     # 接続
     visa_address: str = DEFAULT_VISA_ADDRESS
@@ -29,24 +29,27 @@ class SweepConfig:
     v_off: float = 0.0  # パルスOFF時の電圧（ベース） [V]
 
     # 掃引パラメータ
-    center_delay: float = 0.005  # パルス中心のトリガーからの遅延 [s]
     width_start: float = 0.001  # パルス幅の開始値 [s]
     width_stop: float = 0.005  # パルス幅の終了値 [s]
     width_step: float = 0.001  # パルス幅のステップ [s]
 
-    # 測定パラメータ
-    trigger_count: int = 2  # トリガー回数（各幅での繰り返し数）
-    trigger_time: float = 0.01  # トリガー間隔 [s]
-    aperture_time: float = 0.0001  # アパーチャ時間 [s]
-    sampling_points: int = 20  # サンプリング点数
-    compliance_current: float = 0.1  # コンプライアンス電流 [A]
+    # AWG パラメータ
+    frequency: float = 1000.0  # 周波数 [Hz]（固定。duty で幅を制御）
+    trigger_delay: int = 0  # トリガー遅延 [サンプルポイント数]（8 の倍数）
+    wait_time: float = 1.0  # 掃引ステップ間の待ち時間 [s]
 
-    # 出力
-    output_dir: str = "results"
+    @property
+    def period(self) -> float:
+        """周期 [s] = 1 / frequency."""
+        return 1.0 / self.frequency
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
-        """TOML ファイルから設定を読み込む."""
+        """TOML ファイルから設定を読み込む.
+
+        [awg] セクションに frequency または period のどちらかを記載可能。
+        両方ある場合は frequency が優先される。
+        """
         logger.info("TOML 読み込み: %s", path)
         data = toml.load(path)
         # フラットに展開（セクション付き TOML に対応）
@@ -56,13 +59,18 @@ class SweepConfig:
                 flat.update(value)
             else:
                 flat[str(value)] = value
+        # period → frequency 変換
+        if "period" in flat and "frequency" not in flat:
+            flat["frequency"] = 1.0 / flat.pop("period")
+        elif "period" in flat:
+            flat.pop("period")  # frequency が優先
         # dataclass のフィールド名のみ取り出す
         valid_keys = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in flat.items() if k in valid_keys}
         return cls(**filtered)
 
     def to_toml(self, path: str | Path) -> None:
-        """TOML ファイルへ書き出す."""
+        """TOML ファイルへ書き出す（frequency と period の両方を記載）."""
         logger.info("TOML 書き出し: %s", path)
         data = {
             "connection": {
@@ -73,20 +81,15 @@ class SweepConfig:
                 "v_off": self.v_off,
             },
             "sweep": {
-                "center_delay": self.center_delay,
                 "width_start": self.width_start,
                 "width_stop": self.width_stop,
                 "width_step": self.width_step,
+                "wait_time": self.wait_time,
             },
-            "measurement": {
-                "trigger_count": self.trigger_count,
-                "trigger_time": self.trigger_time,
-                "aperture_time": self.aperture_time,
-                "sampling_points": self.sampling_points,
-                "compliance_current": self.compliance_current,
-            },
-            "output": {
-                "output_dir": self.output_dir,
+            "awg": {
+                "frequency": self.frequency,
+                "period": self.period,
+                "trigger_delay": self.trigger_delay,
             },
         }
         path = Path(path)
@@ -99,8 +102,6 @@ class SweepConfig:
         logger.info("バリデーション実行")
         errors: list[str] = []
 
-        width_max = max(self.width_start, self.width_stop)
-
         if self.width_start <= 0:
             errors.append("width_start は正の値でなければなりません")
         if self.width_stop <= 0:
@@ -108,27 +109,37 @@ class SweepConfig:
         if self.width_step <= 0:
             errors.append("width_step は正の値でなければなりません")
 
-        min_delay = self.center_delay - width_max / 2
-        if min_delay < 0:
-            errors.append(
-                f"center_delay - width_max/2 = {min_delay:.6f} s < 0: "
-                "パルス遅延が負になります"
-            )
+        if self.frequency <= 0:
+            errors.append("frequency は正の値でなければなりません")
 
-        max_end = self.center_delay + width_max / 2
-        if max_end > self.trigger_time:
-            errors.append(
-                f"center_delay + width_max/2 = {max_end:.6f} s > "
-                f"trigger_time = {self.trigger_time:.6f} s: "
-                "パルスがトリガー間隔を超えます"
-            )
+        if self.trigger_delay < 0:
+            errors.append("trigger_delay は 0 以上でなければなりません")
+        if self.trigger_delay % 8 != 0:
+            errors.append("trigger_delay は 8 の倍数でなければなりません")
 
-        if self.trigger_count < 1:
-            errors.append("trigger_count は 1 以上でなければなりません")
-        if self.sampling_points < 1:
-            errors.append("sampling_points は 1 以上でなければなりません")
-        if self.compliance_current <= 0:
-            errors.append("compliance_current は正の値でなければなりません")
+        if self.wait_time < 0:
+            errors.append("wait_time は 0 以上でなければなりません")
+
+        # duty cycle の範囲チェック（VBA UpdateSQR: 0.1〜99.9%）
+        for width in [self.width_start, self.width_stop]:
+            dcycle = width * self.frequency * 100
+            if dcycle < 0.1 or dcycle > 99.9:
+                errors.append(
+                    f"パルス幅 {width:.6f} s での duty cycle = {dcycle:.2f}% "
+                    "が範囲外です（0.1〜99.9%）"
+                )
+
+        # 振幅・オフセットの範囲チェック（VBA UpdateSQR と同じ制限値）
+        ampl = (self.v_on - self.v_off) / 2
+        if ampl < 0.05 or ampl > 2:
+            errors.append(
+                f"振幅 = {ampl:.4f} V が範囲外です（0.05〜2.0 V）"
+            )
+        offs = (self.v_on + self.v_off) / 4
+        if abs(offs) > 1.5:
+            errors.append(
+                f"オフセット = {offs:.4f} V が範囲外です（-1.5〜1.5 V）"
+            )
 
         for e in errors:
             logger.warning("バリデーションエラー: %s", e)

@@ -1,4 +1,4 @@
-"""パルス幅掃引 CLI エントリポイント.
+"""パルス幅掃引 CLI エントリポイント（Agilent 81180A AWG 用）.
 
 Usage:
     python -m pulse_control.main [config.toml]
@@ -11,7 +11,7 @@ from logging import getLogger
 from pathlib import Path
 
 from config import SweepConfig
-from core import PulseInstrument, run_sweep, save_results
+from core import PulseInstrument, run_sweep
 from log_setup import setup_logging
 
 logger = getLogger(__name__)
@@ -45,7 +45,9 @@ def main(config_path: str | None = None) -> None:
         "  幅: %s → %s (step %s) s",
         config.width_start, config.width_stop, config.width_step,
     )
-    logger.info("  center_delay=%s s", config.center_delay)
+    logger.info("  frequency=%s Hz (period=%s s)", config.frequency, config.period)
+    logger.info("  trigger_delay=%s points", config.trigger_delay)
+    logger.info("  wait_time=%s s", config.wait_time)
 
     # 接続チェック
     logger.info("接続チェック中...")
@@ -61,14 +63,12 @@ def main(config_path: str | None = None) -> None:
     instrument = PulseInstrument(config.visa_address)
     try:
         instrument.setup(config)
-        results = run_sweep(config, instrument)
+        run_sweep(config, instrument)
         instrument.teardown()
     finally:
         instrument.close()
 
-    # 結果保存
-    save_results(results, config, config.output_dir)
-    logger.info("完了. 結果は %s/ に保存されました.", config.output_dir)
+    logger.info("掃引完了.")
 
 
 if __name__ == "__main__":
