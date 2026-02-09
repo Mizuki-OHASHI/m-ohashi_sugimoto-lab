@@ -2,15 +2,70 @@
 
 from __future__ import annotations
 
+import math
 import time
 from logging import getLogger
 from typing import Callable
 
+import numpy as np
 import pyvisa
 
 from config import SweepConfig
 
 logger = getLogger(__name__)
+
+
+def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]:
+    """Compute optimal sample rate and points-per-period for arbitrary mode.
+
+    Algorithm:
+    1. Compute GCD of period and all widths at picosecond precision.
+    2. Divide GCD by K to get time_per_point.
+    3. Increase K until points_per_period >= 64 and is a multiple of 8.
+    4. Verify sample_rate = 1/time_per_point is within 10 MSa/s – 4.2 GSa/s.
+    """
+    period = 1.0 / frequency
+    # Convert to picoseconds (integer) for exact GCD
+    ps_period = round(period * 1e12)
+    ps_widths = [round(w * 1e12) for w in widths]
+
+    g = ps_period
+    for pw in ps_widths:
+        g = math.gcd(g, pw)
+    if g == 0:
+        raise ValueError("GCD is zero – check frequency and widths")
+
+    base_points = ps_period // g  # minimum points per period
+
+    # Scale up K so that points_per_period >= 64 and is a multiple of 8
+    k = 1
+    while base_points * k < 64:
+        k += 1
+    # Ensure multiple of 8
+    pts = base_points * k
+    while pts % 8 != 0:
+        k += 1
+        pts = base_points * k
+
+    points_per_period = pts
+    time_per_point = period / points_per_period
+    sample_rate = 1.0 / time_per_point
+
+    return sample_rate, points_per_period
+
+
+def _generate_pulse_waveform(
+    points_per_period: int, duty_cycle: float,
+) -> np.ndarray:
+    """Generate one period of pulse waveform as DAC values.
+
+    ON region = DAC max (4095), OFF region = DAC min (0).
+    Actual output voltage is controlled by :VOLT:AMPLitude / :VOLT:OFFSet.
+    """
+    on_points = round(points_per_period * duty_cycle / 100)
+    waveform = np.zeros(points_per_period, dtype=np.uint16)
+    waveform[:on_points] = 4095
+    return waveform
 
 
 class PulseInstrument:
@@ -105,6 +160,58 @@ class PulseInstrument:
         self._write(f":SQUare:DCYCle {dcycle}")
 
     # ------------------------------------------------------------------ #
+    #  Arbitrary waveform setup
+    # ------------------------------------------------------------------ #
+    def setup_arbitrary(self, config: SweepConfig, widths: list[float]) -> None:
+        """Arbitrary Waveform mode: upload all segments up front."""
+        logger.info("Starting arbitrary waveform setup (%d segments)", len(widths))
+        w = self._write
+
+        # CH2 DC mode (same as square mode)
+        w(":INST CH2")
+        w(":FUNCtion:SHAPe DC")
+
+        # CH1 arbitrary mode
+        w(":INST CH1")
+
+        sample_rate, points_per_period = _calc_arb_params(config.frequency, widths)
+        logger.info(
+            "ARB params: sample_rate=%.3e Sa/s, points_per_period=%d",
+            sample_rate, points_per_period,
+        )
+        w(f":FREQ:RAST {sample_rate}")
+
+        # Upload waveform segment for each pulse width
+        for i, width in enumerate(widths):
+            seg = i + 1
+            dcycle = width * config.frequency * 100
+            waveform = _generate_pulse_waveform(points_per_period, dcycle)
+            w(f":TRACe:DEF {seg}, {points_per_period}")
+            w(f":TRACe:SEL {seg}")
+            # IEEE 488.2 binary block transfer
+            self.instr.write_binary_values(":TRACe:DATA", waveform, datatype="H")
+            logger.debug("Uploaded segment %d: duty=%.2f%%, %d points", seg, dcycle, points_per_period)
+
+        # Select first segment and switch to ARB mode
+        w(":TRACe:SEL 1")
+        w(":FUNC:MODE ARB")
+
+        # Amplitude / offset (same calculation as square mode)
+        ampl = (config.v_on - config.v_off) / 2
+        offs = (config.v_on + config.v_off) / 4
+        w(f":VOLT:AMPLitude {ampl}")
+        w(f":VOLT:OFFSet {offs}")
+
+        w(f":TRIGger:DELay {config.trigger_delay}")
+        w(":OUTPut ON")
+        self._query("*OPC?")
+        logger.info("Arbitrary waveform setup complete")
+
+    def select_segment(self, index: int) -> None:
+        """Switch to a pre-uploaded segment (for arbitrary mode sweep)."""
+        self._write(f":TRACe:SEL {index + 1}")
+
+    # ------------------------------------------------------------------ #
     #  Teardown (based on VBA WaveForm DC switch / SweepTau cleanup)
     # ------------------------------------------------------------------ #
     def teardown(self) -> None:
@@ -146,6 +253,18 @@ def run_sweep(
     widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
     total = len(widths)
 
+    # --- Arbitrary mode: switch pre-uploaded segments ---
+    if config.waveform_mode == "arbitrary":
+        for i in range(total):
+            logger.info("[%d/%d] segment=%d", i + 1, total, i + 1)
+            time.sleep(config.wait_time)
+            instrument.select_segment(i)
+            if callback is not None:
+                callback(i, total)
+        time.sleep(config.wait_time)
+        return
+
+    # --- Square mode: conventional duty cycle changes ---
     for i, width in enumerate(widths):
         dcycle = width * config.frequency * 100
         logger.info("[%d/%d] width=%.6f s, duty=%.2f%%", i + 1, total, width, dcycle)

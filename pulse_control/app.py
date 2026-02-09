@@ -16,7 +16,7 @@ import streamlit as st
 from config import DEFAULT_VISA_ADDRESS, SweepConfig
 
 DEFAULT_CONFIG = Path("sweep_config.toml")
-from core import PulseInstrument, run_sweep
+from core import PulseInstrument, _generate_widths, run_sweep
 from log_setup import setup_logging
 
 setup_logging()
@@ -207,6 +207,13 @@ with col3:
         value=format_si(cfg.wait_time),
         key="_w_wait_time",
     )
+    _MODE_LABELS = {"square": "Square", "arbitrary": "Arbitrary (glitch-free)"}
+    waveform_mode = st.radio(
+        "Waveform Mode",
+        ["square", "arbitrary"],
+        format_func=lambda x: _MODE_LABELS[x],
+        horizontal=True,
+    )
 
 # ------------------------------------------------------------------ #
 #  Parse SI text fields
@@ -248,6 +255,7 @@ def _build_config_from_ui() -> SweepConfig | None:
         frequency=parsed["frequency"],
         trigger_delay=int(trigger_delay),
         wait_time=parsed["wait_time"],
+        waveform_mode=waveform_mode,
     )
 
 
@@ -293,7 +301,12 @@ if st.button("Start Sweep", disabled=bool(errors) or not visa_address, type="pri
     try:
         instrument = PulseInstrument(config.visa_address)
         progress.progress(0, text="Setting up instrument...")
-        instrument.setup(config)
+
+        if config.waveform_mode == "arbitrary":
+            widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
+            instrument.setup_arbitrary(config, widths)
+        else:
+            instrument.setup(config)
 
         def on_step(i: int, total: int) -> None:
             pct = (i + 1) / total

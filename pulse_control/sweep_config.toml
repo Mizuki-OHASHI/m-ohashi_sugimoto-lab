@@ -15,3 +15,4 @@ wait_time = 1.0      # Wait time between sweep steps [s]
 frequency = 10000000.0  # Repetition frequency [Hz] (10 MHz)
 period = 1e-7           # Period [s] (= 1/frequency)
 trigger_delay = 0       # Trigger delay [sample points] (multiple of 8)
+waveform_mode = "square"  # "square" or "arbitrary" (glitch-free)

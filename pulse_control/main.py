@@ -11,7 +11,7 @@ from logging import getLogger
 from pathlib import Path
 
 from config import SweepConfig
-from core import PulseInstrument, run_sweep
+from core import PulseInstrument, _generate_widths, run_sweep
 from log_setup import setup_logging
 
 logger = getLogger(__name__)
@@ -48,6 +48,7 @@ def main(config_path: str | None = None) -> None:
     logger.info("  frequency=%s Hz (period=%s s)", config.frequency, config.period)
     logger.info("  trigger_delay=%s points", config.trigger_delay)
     logger.info("  wait_time=%s s", config.wait_time)
+    logger.info("  waveform_mode=%s", config.waveform_mode)
 
     logger.info("Checking connection...")
     try:
@@ -60,7 +61,11 @@ def main(config_path: str | None = None) -> None:
     logger.info("Starting sweep...")
     instrument = PulseInstrument(config.visa_address)
     try:
-        instrument.setup(config)
+        if config.waveform_mode == "arbitrary":
+            widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
+            instrument.setup_arbitrary(config, widths)
+        else:
+            instrument.setup(config)
         run_sweep(config, instrument)
         instrument.teardown()
     finally:

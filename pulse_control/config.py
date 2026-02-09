@@ -37,6 +37,7 @@ class SweepConfig:
     frequency: float    # Repetition frequency [Hz] (width controlled via duty cycle)
     trigger_delay: int  # Trigger delay [sample points] (multiple of 8)
     wait_time: float    # Wait time between sweep steps [s]
+    waveform_mode: str = "square"  # "square" or "arbitrary"
 
     @property
     def period(self) -> float:
@@ -90,6 +91,7 @@ class SweepConfig:
                 "frequency": self.frequency,
                 "period": self.period,
                 "trigger_delay": self.trigger_delay,
+                "waveform_mode": self.waveform_mode,
             },
         }
         path = Path(path)
@@ -120,6 +122,11 @@ class SweepConfig:
         if self.wait_time < 0:
             errors.append("wait_time must be >= 0")
 
+        if self.waveform_mode not in ("square", "arbitrary"):
+            errors.append(
+                f"waveform_mode must be 'square' or 'arbitrary', got '{self.waveform_mode}'"
+            )
+
         # Duty cycle range check (VBA UpdateSQR: 0.1–99.9%)
         for width in [self.width_start, self.width_stop]:
             dcycle = width * self.frequency * 100
@@ -140,6 +147,31 @@ class SweepConfig:
             errors.append(
                 f"Offset = {offs:.4f} V is out of range (-1.5–1.5 V)"
             )
+
+        # Arbitrary-mode specific checks
+        if self.waveform_mode == "arbitrary":
+            from core import _calc_arb_params, _generate_widths
+
+            widths = _generate_widths(self.width_start, self.width_stop, self.width_step)
+            try:
+                sample_rate, points_per_period = _calc_arb_params(self.frequency, widths)
+                if sample_rate < 10e6 or sample_rate > 4.2e9:
+                    errors.append(
+                        f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
+                        "is out of range (10 MSa/s – 4.2 GSa/s)"
+                    )
+                if points_per_period < 64:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "is too short (must be >= 64)"
+                    )
+                if points_per_period % 8 != 0:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "must be a multiple of 8"
+                    )
+            except ValueError as exc:
+                errors.append(f"Arbitrary mode parameter error: {exc}")
 
         for e in errors:
             logger.warning("Validation error: %s", e)
