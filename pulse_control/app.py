@@ -214,6 +214,7 @@ with col3:
         format_func=lambda x: _MODE_LABELS[x],
         horizontal=True,
     )
+    st.info("Pulse center is fixed at the middle of the period during sweep.")
 
 # ------------------------------------------------------------------ #
 #  Parse SI text fields

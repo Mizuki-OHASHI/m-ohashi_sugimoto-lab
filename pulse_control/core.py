@@ -64,7 +64,8 @@ def _generate_pulse_waveform(
     """
     on_points = round(points_per_period * duty_cycle / 100)
     waveform = np.zeros(points_per_period, dtype=np.uint16)
-    waveform[:on_points] = 4095
+    start = (points_per_period - on_points) // 2
+    waveform[start:start + on_points] = 4095
     return waveform
 
 
@@ -143,6 +144,10 @@ class PulseInstrument:
         dcycle = config.width_start * config.frequency * 100
         w(f":SQUare:DCYCle {dcycle}")
 
+        # Phase offset to center the pulse at T/2
+        phase = 180.0 - dcycle * 1.8
+        w(f":PHASe {phase}")
+
         w(":OUTPut ON")
         q("*OPC?")
         logger.info("Instrument setup complete")
@@ -158,6 +163,9 @@ class PulseInstrument:
         """
         dcycle = width * frequency * 100
         self._write(f":SQUare:DCYCle {dcycle}")
+        # Phase offset to keep pulse centered at T/2
+        phase = 180.0 - dcycle * 1.8
+        self._write(f":PHASe {phase}")
 
     # ------------------------------------------------------------------ #
     #  Arbitrary waveform setup
@@ -221,6 +229,7 @@ class PulseInstrument:
         # CH1 off (VBA WaveForm L542-543)
         w(":INST CH1")
         w(":OUTPut OFF")
+        w(":PHASe 0")
         w(":FUNCtion:SHAPe DC")
         w(":DC:OFFSet 0")
         # CH2 off (VBA SweepTau L126-128)
