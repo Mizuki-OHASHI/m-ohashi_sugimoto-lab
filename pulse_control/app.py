@@ -299,6 +299,7 @@ if st.button("Start Sweep", disabled=bool(errors) or not visa_address, type="pri
     logger.info("Sweep started")
     progress = st.progress(0, text="Connecting...")
 
+    instrument = None
     try:
         instrument = PulseInstrument(config.visa_address)
         progress.progress(0, text="Setting up instrument...")
@@ -315,7 +316,6 @@ if st.button("Start Sweep", disabled=bool(errors) or not visa_address, type="pri
 
         run_sweep(config, instrument, callback=on_step)
         instrument.teardown()
-        instrument.close()
 
         progress.progress(1.0, text="Done!")
         logger.info("Sweep completed")
@@ -323,3 +323,6 @@ if st.button("Start Sweep", disabled=bool(errors) or not visa_address, type="pri
     except Exception as exc:
         st.error(f"Error: {exc}")
         logger.exception("Error during sweep")
+    finally:
+        if instrument is not None:
+            instrument.close()

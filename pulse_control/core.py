@@ -74,10 +74,16 @@ class PulseInstrument:
 
     def __init__(self, visa_address: str) -> None:
         rm = pyvisa.ResourceManager("@py")
-        self.instr = rm.open_resource(visa_address)
-        self.instr.read_termination = "\n"
-        self.instr.write_termination = "\n"
-        self.idn = self.instr.query("*IDN?")
+        instr = rm.open_resource(visa_address)
+        instr.read_termination = "\n"
+        instr.write_termination = "\n"
+        instr.timeout = 5000
+        try:
+            self.idn = instr.query("*IDN?")
+        except Exception:
+            instr.close()
+            raise
+        self.instr = instr
         logger.info("Connected: %s", self.idn)
 
     # ------------------------------------------------------------------ #
@@ -104,6 +110,7 @@ class PulseInstrument:
         instr = rm.open_resource(visa_address)
         instr.read_termination = "\n"
         instr.write_termination = "\n"
+        instr.timeout = 5000
         try:
             idn = instr.query("*IDN?")
         except Exception:
