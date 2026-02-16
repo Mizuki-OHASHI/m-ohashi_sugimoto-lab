@@ -1,0 +1,12 @@
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"  # Agilent 81180A VISA address
+
+[pulse]
+v_on = 0.0    # Voltage during pulse ON [V]
+v_off = -1.0  # Voltage during pulse OFF (base) [V]
+pulse_width = 1e-8  # Pulse width [s] (10 ns)
+
+[awg]
+frequency = 10000000.0  # Repetition frequency [Hz] (10 MHz)
+period = 1e-7           # Period [s] (= 1/frequency)
+trigger_delay = 0       # Trigger delay [sample points] (multiple of 8)

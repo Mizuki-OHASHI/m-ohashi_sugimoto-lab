@@ -1,4 +1,4 @@
-"""Sweep configuration module for Agilent 81180A AWG."""
+"""Configuration module for Agilent 81180A AWG."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ DEFAULT_VISA_ADDRESS = "TCPIP0::192.168.0.251::5025::SOCKET"
 
 
 @dataclass
-class SweepConfig:
-    """Pulse width sweep configuration for Agilent 81180A AWG."""
+class BaseConfig:
+    """Common parameters shared by all operation modes."""
 
     # Connection
     visa_address: str
@@ -28,29 +28,44 @@ class SweepConfig:
     v_on: float        # Voltage during pulse ON [V]
     v_off: float       # Voltage during pulse OFF (base) [V]
 
-    # Sweep parameters
-    width_start: float  # Pulse width start [s]
-    width_stop: float   # Pulse width stop [s]
-    width_step: float   # Pulse width step [s]
-
     # AWG parameters
     frequency: float    # Repetition frequency [Hz] (width controlled via duty cycle)
     trigger_delay: int  # Trigger delay [sample points] (multiple of 8)
-    wait_time: float    # Wait time between sweep steps [s]
-    waveform_mode: str = "square"  # "square" or "arbitrary"
 
     @property
     def period(self) -> float:
         """Period [s] = 1 / frequency."""
         return 1.0 / self.frequency
 
-    @classmethod
-    def from_toml(cls, path: str | Path) -> SweepConfig:
-        """Load configuration from a TOML file.
+    def _validate_common(self) -> list[str]:
+        """Validate fields common to all modes."""
+        errors: list[str] = []
 
-        Either frequency or period can be specified in the [awg] section.
-        If both are present, frequency takes precedence.
-        """
+        if self.frequency <= 0:
+            errors.append("frequency must be positive")
+
+        if self.trigger_delay < 0:
+            errors.append("trigger_delay must be >= 0")
+        if self.trigger_delay % 8 != 0:
+            errors.append("trigger_delay must be a multiple of 8")
+
+        # Amplitude/offset range check (same limits as VBA UpdateSQR)
+        ampl = (self.v_on - self.v_off) / 2
+        if ampl < 0.05 or ampl > 2:
+            errors.append(
+                f"Amplitude = {ampl:.4f} V is out of range (0.05–2.0 V)"
+            )
+        offs = (self.v_on + self.v_off) / 4
+        if abs(offs) > 1.5:
+            errors.append(
+                f"Offset = {offs:.4f} V is out of range (-1.5–1.5 V)"
+            )
+
+        return errors
+
+    @staticmethod
+    def _load_and_flatten_toml(path: str | Path) -> dict:
+        """Load TOML and flatten sections; handle period -> frequency conversion."""
         logger.info("Loading TOML: %s", path)
         data = toml.load(path)
         # Flatten sections into a single dict
@@ -65,6 +80,90 @@ class SweepConfig:
             flat["frequency"] = 1.0 / flat.pop("period")
         elif "period" in flat:
             flat.pop("period")  # frequency takes precedence
+        return flat
+
+
+@dataclass
+class PulseConfig(BaseConfig):
+    """Simple pulse output configuration for Agilent 81180A AWG."""
+
+    pulse_width: float  # Pulse width [s]
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> PulseConfig:
+        """Load configuration from a TOML file."""
+        flat = cls._load_and_flatten_toml(path)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in flat.items() if k in valid_keys}
+        return cls(**filtered)
+
+    def to_toml(self, path: str | Path) -> None:
+        """Export to a TOML file (includes both frequency and period)."""
+        logger.info("Writing TOML: %s", path)
+        data = {
+            "connection": {
+                "visa_address": self.visa_address,
+            },
+            "pulse": {
+                "v_on": self.v_on,
+                "v_off": self.v_off,
+                "pulse_width": self.pulse_width,
+            },
+            "awg": {
+                "frequency": self.frequency,
+                "period": self.period,
+                "trigger_delay": self.trigger_delay,
+            },
+        }
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            toml.dump(data, f)
+
+    def validate(self) -> list[str]:
+        """Validate parameter consistency. Returns a list of error messages (empty if OK)."""
+        logger.info("Running validation")
+        errors = self._validate_common()
+
+        if self.pulse_width <= 0:
+            errors.append("pulse_width must be positive")
+
+        # Duty cycle range check (0.1–99.9%)
+        if self.frequency > 0 and self.pulse_width > 0:
+            dcycle = self.pulse_width * self.frequency * 100
+            if dcycle < 0.1 or dcycle > 99.9:
+                errors.append(
+                    f"Duty cycle = {dcycle:.2f}% at width {self.pulse_width:.6f} s "
+                    "is out of range (0.1–99.9%)"
+                )
+
+        for e in errors:
+            logger.warning("Validation error: %s", e)
+
+        return errors
+
+
+@dataclass
+class SweepConfig(BaseConfig):
+    """Pulse width sweep configuration for Agilent 81180A AWG."""
+
+    # Sweep parameters
+    width_start: float  # Pulse width start [s]
+    width_stop: float   # Pulse width stop [s]
+    width_step: float   # Pulse width step [s]
+
+    # Sweep control
+    wait_time: float    # Wait time between sweep steps [s]
+    waveform_mode: str = "square"  # "square" or "arbitrary"
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> SweepConfig:
+        """Load configuration from a TOML file.
+
+        Either frequency or period can be specified in the [awg] section.
+        If both are present, frequency takes precedence.
+        """
+        flat = cls._load_and_flatten_toml(path)
         # Keep only valid dataclass field names
         valid_keys = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in flat.items() if k in valid_keys}
@@ -102,7 +201,7 @@ class SweepConfig:
     def validate(self) -> list[str]:
         """Validate parameter consistency. Returns a list of error messages (empty if OK)."""
         logger.info("Running validation")
-        errors: list[str] = []
+        errors = self._validate_common()
 
         if self.width_start <= 0:
             errors.append("width_start must be positive")
@@ -110,14 +209,6 @@ class SweepConfig:
             errors.append("width_stop must be positive")
         if self.width_step <= 0:
             errors.append("width_step must be positive")
-
-        if self.frequency <= 0:
-            errors.append("frequency must be positive")
-
-        if self.trigger_delay < 0:
-            errors.append("trigger_delay must be >= 0")
-        if self.trigger_delay % 8 != 0:
-            errors.append("trigger_delay must be a multiple of 8")
 
         if self.wait_time < 0:
             errors.append("wait_time must be >= 0")
@@ -135,18 +226,6 @@ class SweepConfig:
                     f"Duty cycle = {dcycle:.2f}% at width {width:.6f} s "
                     "is out of range (0.1–99.9%)"
                 )
-
-        # Amplitude/offset range check (same limits as VBA UpdateSQR)
-        ampl = (self.v_on - self.v_off) / 2
-        if ampl < 0.05 or ampl > 2:
-            errors.append(
-                f"Amplitude = {ampl:.4f} V is out of range (0.05–2.0 V)"
-            )
-        offs = (self.v_on + self.v_off) / 4
-        if abs(offs) > 1.5:
-            errors.append(
-                f"Offset = {offs:.4f} V is out of range (-1.5–1.5 V)"
-            )
 
         # Arbitrary-mode specific checks
         if self.waveform_mode == "arbitrary":

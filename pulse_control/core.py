@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 import pyvisa
 
-from config import SweepConfig
+from config import BaseConfig, SweepConfig
 
 logger = getLogger(__name__)
 
@@ -124,7 +124,7 @@ class PulseInstrument:
     # ------------------------------------------------------------------ #
     #  Instrument setup (based on VBA UpdateSQR / SweepTau)
     # ------------------------------------------------------------------ #
-    def setup(self, config: SweepConfig) -> None:
+    def setup(self, config: BaseConfig, initial_width: float) -> None:
         """Initial instrument setup (square mode, amplitude, offset, etc.)."""
         logger.info("Starting instrument setup")
         w = self._write
@@ -147,8 +147,8 @@ class PulseInstrument:
 
         w(f":TRIGger:DELay {config.trigger_delay}")
 
-        # Initial duty cycle from width_start
-        dcycle = config.width_start * config.frequency * 100
+        # Initial duty cycle
+        dcycle = initial_width * config.frequency * 100
         w(f":SQUare:DCYCle {dcycle}")
 
         # Phase offset to center the pulse at T/2
@@ -177,7 +177,7 @@ class PulseInstrument:
     # ------------------------------------------------------------------ #
     #  Arbitrary waveform setup
     # ------------------------------------------------------------------ #
-    def setup_arbitrary(self, config: SweepConfig, widths: list[float]) -> None:
+    def setup_arbitrary(self, config: BaseConfig, widths: list[float]) -> None:
         """Arbitrary Waveform mode: upload all segments up front."""
         logger.info("Starting arbitrary waveform setup (%d segments)", len(widths))
         w = self._write
@@ -225,6 +225,24 @@ class PulseInstrument:
     def select_segment(self, index: int) -> None:
         """Switch to a pre-uploaded segment (for arbitrary mode sweep)."""
         self._write(f":TRACe:SEL {index + 1}")
+
+    # ------------------------------------------------------------------ #
+    #  DC 0V (safe state)
+    # ------------------------------------------------------------------ #
+    def set_dc_zero(self) -> None:
+        """Set both channels to DC 0V (safe state with output ON)."""
+        logger.info("Setting DC 0V")
+        w = self._write
+        w(":INST CH1")
+        w(":OUTPut OFF")
+        w(":PHASe 0")
+        w(":FUNCtion:SHAPe DC")
+        w(":DC:OFFSet 0")
+        w(":INST CH2")
+        w(":DC:OFFSet 0")
+        w(":INST CH1")
+        self._query("*OPC?")
+        logger.info("DC 0V set complete")
 
     # ------------------------------------------------------------------ #
     #  Teardown (based on VBA WaveForm DC switch / SweepTau cleanup)
