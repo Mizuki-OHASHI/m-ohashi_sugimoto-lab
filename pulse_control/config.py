@@ -194,6 +194,7 @@ class SweepConfig(BaseConfig):
     # Sweep control
     wait_time: float    # Wait time between sweep steps [s]
     waveform_mode: str = "square"  # "square" or "arbitrary"
+    settling_time: float = 0.0  # Initial settling time before sweep [s]
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
@@ -224,6 +225,7 @@ class SweepConfig(BaseConfig):
                 "width_stop": self.width_stop,
                 "width_step": self.width_step,
                 "wait_time": self.wait_time,
+                "settling_time": self.settling_time,
             },
             "awg": {
                 "frequency": self.frequency,
@@ -251,6 +253,9 @@ class SweepConfig(BaseConfig):
 
         if self.wait_time < 0:
             errors.append("wait_time must be >= 0")
+
+        if self.settling_time < 0:
+            errors.append("settling_time must be >= 0")
 
         if self.waveform_mode not in ("square", "arbitrary"):
             errors.append(
@@ -318,6 +323,7 @@ class DelaySweepConfig(BaseConfig):
     # Sweep control
     wait_time: float     # Wait time between sweep steps [s]
     waveform_mode: str = "square"  # "square" or "arbitrary"
+    settling_time: float = 0.0  # Initial settling time before sweep [s]
 
     @classmethod
     def from_toml(cls, path: str | Path) -> DelaySweepConfig:
@@ -348,6 +354,7 @@ class DelaySweepConfig(BaseConfig):
                 "delay_stop": self.delay_stop,
                 "delay_step": self.delay_step,
                 "wait_time": self.wait_time,
+                "settling_time": self.settling_time,
             },
             "awg": {
                 "frequency": self.frequency,
@@ -397,6 +404,9 @@ class DelaySweepConfig(BaseConfig):
 
         if self.wait_time < 0:
             errors.append("wait_time must be >= 0")
+
+        if self.settling_time < 0:
+            errors.append("settling_time must be >= 0")
 
         # Duty cycle range check
         if self.frequency > 0 and self.pulse_width > 0:

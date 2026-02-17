@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import time
 from logging import getLogger
 from pathlib import Path
 
@@ -435,6 +436,12 @@ with tab_sweep:
         sweep_channel = st.radio(
             "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_sweep_ch",
         )
+        sweep_settling_time = st.number_input(
+            "Settling Time [s]",
+            value=0.0, min_value=0.0, step=1.0, format="%.1f",
+            help="Wait time before sweep starts (for DUT to reach steady state)",
+            key="_w_settling_time",
+        )
         st.info("Pulse center is fixed at the middle of the period during sweep.")
 
     # Parse sweep-specific fields
@@ -467,6 +474,7 @@ with tab_sweep:
             trigger_delay=int(trigger_delay),
             wait_time=sweep_parsed["wait_time"],
             waveform_mode=waveform_mode,
+            settling_time=sweep_settling_time,
         )
 
     # Validation
@@ -501,9 +509,31 @@ with tab_sweep:
                 else:
                     instrument.setup(config, config.width_start, channel=ch)
 
+            # Settling phase
+            if config.settling_time > 0:
+                t0 = time.time()
+                while (elapsed := time.time() - t0) < config.settling_time:
+                    pct = elapsed / config.settling_time
+                    progress.progress(
+                        pct,
+                        text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                    )
+                    time.sleep(0.2)
+
+            sweep_start = time.time()
+
             def on_step(i: int, total: int) -> None:
                 pct = (i + 1) / total
-                progress.progress(pct, text=f"Sweeping... {i + 1}/{total}")
+                elapsed = time.time() - sweep_start
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                remaining = (total - i - 1) / rate if rate > 0 else 0
+                progress.progress(
+                    pct,
+                    text=(
+                        f"Sweeping... {i + 1}/{total}"
+                        f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                    ),
+                )
 
             run_sweep(config, instrument, callback=on_step, channels=channels)
 
@@ -568,6 +598,12 @@ with tab_delay:
         delay_channel = st.radio(
             "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_delay_ch",
         )
+        delay_settling_time = st.number_input(
+            "Settling Time [s]",
+            value=0.0, min_value=0.0, step=1.0, format="%.1f",
+            help="Wait time before sweep starts (for DUT to reach steady state)",
+            key="_w_delay_settling_time",
+        )
 
     # Parse delay-specific fields
     delay_parse_errors = list(common_parse_errors)
@@ -604,6 +640,7 @@ with tab_delay:
             delay_step=int(delay_step_val),
             wait_time=delay_parsed["wait_time"],
             waveform_mode=delay_waveform_mode,
+            settling_time=delay_settling_time,
         )
 
     # Validation
@@ -637,9 +674,31 @@ with tab_delay:
                 else:
                     instrument.setup(config, config.pulse_width, channel=ch)
 
+            # Settling phase
+            if config.settling_time > 0:
+                t0 = time.time()
+                while (elapsed := time.time() - t0) < config.settling_time:
+                    pct = elapsed / config.settling_time
+                    progress.progress(
+                        pct,
+                        text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                    )
+                    time.sleep(0.2)
+
+            sweep_start = time.time()
+
             def on_delay_step(i: int, total: int) -> None:
                 pct = (i + 1) / total
-                progress.progress(pct, text=f"Sweeping... {i + 1}/{total}")
+                elapsed = time.time() - sweep_start
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                remaining = (total - i - 1) / rate if rate > 0 else 0
+                progress.progress(
+                    pct,
+                    text=(
+                        f"Sweeping... {i + 1}/{total}"
+                        f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                    ),
+                )
 
             run_delay_sweep(config, instrument, callback=on_delay_step, channels=channels)
 
