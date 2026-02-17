@@ -50,7 +50,7 @@ class BaseConfig:
             errors.append("trigger_delay must be a multiple of 8")
 
         # Amplitude/offset range check (same limits as VBA UpdateSQR)
-        ampl = (self.v_on - self.v_off) / 2
+        ampl = abs(self.v_on - self.v_off) / 2
         if ampl < 0.05 or ampl > 2:
             errors.append(
                 f"Amplitude = {ampl:.4f} V is out of range (0.05–2.0 V)"
@@ -88,6 +88,7 @@ class PulseConfig(BaseConfig):
     """Simple pulse output configuration for Agilent 81180A AWG."""
 
     pulse_width: float  # Pulse width [s]
+    waveform_mode: str = "square"  # "square" or "arbitrary"
 
     @classmethod
     def from_toml(cls, path: str | Path) -> PulseConfig:
@@ -113,6 +114,7 @@ class PulseConfig(BaseConfig):
                 "frequency": self.frequency,
                 "period": self.period,
                 "trigger_delay": self.trigger_delay,
+                "waveform_mode": self.waveform_mode,
             },
         }
         path = Path(path)
@@ -128,6 +130,17 @@ class PulseConfig(BaseConfig):
         if self.pulse_width <= 0:
             errors.append("pulse_width must be positive")
 
+        if self.waveform_mode not in ("square", "arbitrary"):
+            errors.append(
+                f"waveform_mode must be 'square' or 'arbitrary', got '{self.waveform_mode}'"
+            )
+
+        # Square mode cannot handle V_ON < V_OFF (81180A ignores amplitude sign and :PHASe)
+        if self.waveform_mode == "square" and self.v_on < self.v_off:
+            errors.append(
+                "Square mode does not support V_ON < V_OFF. Use Arbitrary mode."
+            )
+
         # Duty cycle range check (0.1–99.9%)
         if self.frequency > 0 and self.pulse_width > 0:
             dcycle = self.pulse_width * self.frequency * 100
@@ -136,6 +149,32 @@ class PulseConfig(BaseConfig):
                     f"Duty cycle = {dcycle:.2f}% at width {self.pulse_width:.6f} s "
                     "is out of range (0.1–99.9%)"
                 )
+
+        # Arbitrary-mode specific checks
+        if self.waveform_mode == "arbitrary":
+            from core import _calc_arb_params
+
+            try:
+                sample_rate, points_per_period = _calc_arb_params(
+                    self.frequency, [self.pulse_width],
+                )
+                if sample_rate < 10e6 or sample_rate > 4.2e9:
+                    errors.append(
+                        f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
+                        "is out of range (10 MSa/s – 4.2 GSa/s)"
+                    )
+                if points_per_period < 320:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "is too short (must be >= 320)"
+                    )
+                if points_per_period % 32 != 0:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "must be a multiple of 32"
+                    )
+            except ValueError as exc:
+                errors.append(f"Arbitrary mode parameter error: {exc}")
 
         for e in errors:
             logger.warning("Validation error: %s", e)
@@ -218,6 +257,12 @@ class SweepConfig(BaseConfig):
                 f"waveform_mode must be 'square' or 'arbitrary', got '{self.waveform_mode}'"
             )
 
+        # Square mode cannot handle V_ON < V_OFF (81180A ignores amplitude sign and :PHASe)
+        if self.waveform_mode == "square" and self.v_on < self.v_off:
+            errors.append(
+                "Square mode does not support V_ON < V_OFF. Use Arbitrary mode."
+            )
+
         # Duty cycle range check (VBA UpdateSQR: 0.1–99.9%)
         for width in [self.width_start, self.width_stop]:
             dcycle = width * self.frequency * 100
@@ -239,15 +284,151 @@ class SweepConfig(BaseConfig):
                         f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
                         "is out of range (10 MSa/s – 4.2 GSa/s)"
                     )
-                if points_per_period < 64:
+                if points_per_period < 320:
                     errors.append(
                         f"Arbitrary mode segment length = {points_per_period} "
-                        "is too short (must be >= 64)"
+                        "is too short (must be >= 320)"
                     )
-                if points_per_period % 8 != 0:
+                if points_per_period % 32 != 0:
                     errors.append(
                         f"Arbitrary mode segment length = {points_per_period} "
-                        "must be a multiple of 8"
+                        "must be a multiple of 32"
+                    )
+            except ValueError as exc:
+                errors.append(f"Arbitrary mode parameter error: {exc}")
+
+        for e in errors:
+            logger.warning("Validation error: %s", e)
+
+        return errors
+
+
+@dataclass
+class DelaySweepConfig(BaseConfig):
+    """Trigger delay sweep configuration for Agilent 81180A AWG."""
+
+    # Pulse (fixed during sweep)
+    pulse_width: float   # Pulse width [s]
+
+    # Delay sweep parameters (sample points, must be multiples of 8)
+    delay_start: int     # Trigger delay start [sample points]
+    delay_stop: int      # Trigger delay stop [sample points]
+    delay_step: int      # Trigger delay step [sample points]
+
+    # Sweep control
+    wait_time: float     # Wait time between sweep steps [s]
+    waveform_mode: str = "square"  # "square" or "arbitrary"
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> DelaySweepConfig:
+        """Load configuration from a TOML file."""
+        flat = cls._load_and_flatten_toml(path)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in flat.items() if k in valid_keys}
+        # Ensure delay fields are int
+        for key in ("delay_start", "delay_stop", "delay_step"):
+            if key in filtered:
+                filtered[key] = int(filtered[key])
+        return cls(**filtered)
+
+    def to_toml(self, path: str | Path) -> None:
+        """Export to a TOML file (includes both frequency and period)."""
+        logger.info("Writing TOML: %s", path)
+        data = {
+            "connection": {
+                "visa_address": self.visa_address,
+            },
+            "pulse": {
+                "v_on": self.v_on,
+                "v_off": self.v_off,
+                "pulse_width": self.pulse_width,
+            },
+            "delay_sweep": {
+                "delay_start": self.delay_start,
+                "delay_stop": self.delay_stop,
+                "delay_step": self.delay_step,
+                "wait_time": self.wait_time,
+            },
+            "awg": {
+                "frequency": self.frequency,
+                "period": self.period,
+                "trigger_delay": self.trigger_delay,
+                "waveform_mode": self.waveform_mode,
+            },
+        }
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            toml.dump(data, f)
+
+    def validate(self) -> list[str]:
+        """Validate parameter consistency."""
+        logger.info("Running validation")
+        errors = self._validate_common()
+
+        if self.pulse_width <= 0:
+            errors.append("pulse_width must be positive")
+
+        if self.waveform_mode not in ("square", "arbitrary"):
+            errors.append(
+                f"waveform_mode must be 'square' or 'arbitrary', got '{self.waveform_mode}'"
+            )
+
+        # Square mode cannot handle V_ON < V_OFF (81180A ignores amplitude sign and :PHASe)
+        if self.waveform_mode == "square" and self.v_on < self.v_off:
+            errors.append(
+                "Square mode does not support V_ON < V_OFF. Use Arbitrary mode."
+            )
+
+        if self.delay_start < 0:
+            errors.append("delay_start must be >= 0")
+        if self.delay_stop < 0:
+            errors.append("delay_stop must be >= 0")
+        if self.delay_step <= 0:
+            errors.append("delay_step must be positive")
+
+        for name, val in [
+            ("delay_start", self.delay_start),
+            ("delay_stop", self.delay_stop),
+            ("delay_step", self.delay_step),
+        ]:
+            if val % 8 != 0:
+                errors.append(f"{name} must be a multiple of 8")
+
+        if self.wait_time < 0:
+            errors.append("wait_time must be >= 0")
+
+        # Duty cycle range check
+        if self.frequency > 0 and self.pulse_width > 0:
+            dcycle = self.pulse_width * self.frequency * 100
+            if dcycle < 0.1 or dcycle > 99.9:
+                errors.append(
+                    f"Duty cycle = {dcycle:.2f}% at width {self.pulse_width:.6f} s "
+                    "is out of range (0.1–99.9%)"
+                )
+
+        # Arbitrary-mode specific checks
+        if self.waveform_mode == "arbitrary":
+            from core import _calc_arb_params
+
+            try:
+                sample_rate, points_per_period = _calc_arb_params(
+                    self.frequency, [self.pulse_width],
+                )
+                if sample_rate < 10e6 or sample_rate > 4.2e9:
+                    errors.append(
+                        f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
+                        "is out of range (10 MSa/s – 4.2 GSa/s)"
+                    )
+                if points_per_period < 320:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "is too short (must be >= 320)"
+                    )
+                if points_per_period % 32 != 0:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "must be a multiple of 32"
                     )
             except ValueError as exc:
                 errors.append(f"Arbitrary mode parameter error: {exc}")

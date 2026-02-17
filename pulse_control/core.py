@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 import pyvisa
 
-from config import BaseConfig, SweepConfig
+from config import BaseConfig, DelaySweepConfig, SweepConfig
 
 logger = getLogger(__name__)
 
@@ -21,7 +21,8 @@ def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]
     Algorithm:
     1. Compute GCD of period and all widths at picosecond precision.
     2. Divide GCD by K to get time_per_point.
-    3. Increase K until points_per_period >= 64 and is a multiple of 8.
+    3. Increase K until points_per_period >= 320 and is a multiple of 32.
+       (81180A: min segment = 320 points, increment = 32 points)
     4. Verify sample_rate = 1/time_per_point is within 10 MSa/s – 4.2 GSa/s.
     """
     period = 1.0 / frequency
@@ -37,13 +38,14 @@ def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]
 
     base_points = ps_period // g  # minimum points per period
 
-    # Scale up K so that points_per_period >= 64 and is a multiple of 8
+    # Scale up K so that points_per_period >= 320 and is a multiple of 32
+    # (81180A minimum segment length = 320, increment = 32)
     k = 1
-    while base_points * k < 64:
+    while base_points * k < 320:
         k += 1
-    # Ensure multiple of 8
+    # Ensure multiple of 32
     pts = base_points * k
-    while pts % 8 != 0:
+    while pts % 32 != 0:
         k += 1
         pts = base_points * k
 
@@ -55,17 +57,25 @@ def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]
 
 
 def _generate_pulse_waveform(
-    points_per_period: int, duty_cycle: float,
+    points_per_period: int, duty_cycle: float, *, inverted: bool = False,
 ) -> np.ndarray:
-    """Generate one period of pulse waveform as DAC values.
+    """Generate one period of pulse waveform as DAC values (centered).
 
-    ON region = DAC max (4095), OFF region = DAC min (0).
-    Actual output voltage is controlled by :VOLT:AMPLitude / :VOLT:OFFSet.
+    The ON region is always centered within the period.
+
+    When inverted=False (V_ON >= V_OFF, HIGH = V_ON):
+        ON region = DAC 4095 (HIGH), OFF region = DAC 0 (LOW).
+    When inverted=True (V_ON < V_OFF, HIGH = V_OFF):
+        ON region = DAC 0 (LOW = V_ON), OFF region = DAC 4095 (HIGH = V_OFF).
     """
     on_points = round(points_per_period * duty_cycle / 100)
-    waveform = np.zeros(points_per_period, dtype=np.uint16)
     start = (points_per_period - on_points) // 2
-    waveform[start:start + on_points] = 4095
+    if inverted:
+        waveform = np.full(points_per_period, 4095, dtype=np.uint16)
+        waveform[start:start + on_points] = 0
+    else:
+        waveform = np.zeros(points_per_period, dtype=np.uint16)
+        waveform[start:start + on_points] = 4095
     return waveform
 
 
@@ -124,70 +134,69 @@ class PulseInstrument:
     # ------------------------------------------------------------------ #
     #  Instrument setup (based on VBA UpdateSQR / SweepTau)
     # ------------------------------------------------------------------ #
-    def setup(self, config: BaseConfig, initial_width: float) -> None:
+    def setup(
+        self, config: BaseConfig, initial_width: float, *, channel: int = 1,
+    ) -> None:
         """Initial instrument setup (square mode, amplitude, offset, etc.)."""
-        logger.info("Starting instrument setup")
+        logger.info("Starting instrument setup (CH%d)", channel)
         w = self._write
         q = self._query
 
-        # Set CH2 to DC mode (VBA SweepTau L63-66)
-        w(":INST CH2")
-        w(":FUNCtion:SHAPe DC")
-
-        # CH1 configuration (VBA UpdateSQR L154,196-200)
-        w(":INST CH1")
+        w(f":INST CH{channel}")
         w(":FUNCtion:SHAPe SQUare")
         w(f":FREQuency {config.frequency}")
 
         # High-impedance load calculation (VBA UpdateSQR L183-184)
-        ampl = (config.v_on - config.v_off) / 2
+        ampl = abs(config.v_on - config.v_off) / 2
         offs = (config.v_on + config.v_off) / 4
         w(f":VOLT:AMPLitude {ampl}")
         w(f":VOLT:OFFSet {offs}")
 
         w(f":TRIGger:DELay {config.trigger_delay}")
 
-        # Initial duty cycle
         dcycle = initial_width * config.frequency * 100
         w(f":SQUare:DCYCle {dcycle}")
 
         # Phase offset to center the pulse at T/2
         phase = 180.0 - dcycle * 1.8
+        logger.info(
+            "Square setup: v_on=%.4f, v_off=%.4f, dcycle=%.2f%%, phase=%.1f",
+            config.v_on, config.v_off, dcycle, phase,
+        )
         w(f":PHASe {phase}")
 
         w(":OUTPut ON")
         q("*OPC?")
-        logger.info("Instrument setup complete")
+        logger.info("Instrument setup complete (CH%d)", channel)
 
     # ------------------------------------------------------------------ #
     #  Pulse width control
     # ------------------------------------------------------------------ #
-    def set_pulse_width(self, width: float, frequency: float) -> None:
-        """Convert pulse width to duty cycle and apply.
-
-        CH1 is already selected by setup(), so channel selection is skipped
-        to minimise commands and reduce glitch duration.
-        """
+    def set_pulse_width(
+        self, width: float, frequency: float, *, channel: int = 1,
+    ) -> None:
+        """Convert pulse width to duty cycle and apply."""
+        self._write(f":INST CH{channel}")
         dcycle = width * frequency * 100
         self._write(f":SQUare:DCYCle {dcycle}")
-        # Phase offset to keep pulse centered at T/2
         phase = 180.0 - dcycle * 1.8
         self._write(f":PHASe {phase}")
 
     # ------------------------------------------------------------------ #
     #  Arbitrary waveform setup
     # ------------------------------------------------------------------ #
-    def setup_arbitrary(self, config: BaseConfig, widths: list[float]) -> None:
+    def setup_arbitrary(
+        self, config: BaseConfig, widths: list[float], *, channel: int = 1,
+    ) -> None:
         """Arbitrary Waveform mode: upload all segments up front."""
-        logger.info("Starting arbitrary waveform setup (%d segments)", len(widths))
+        logger.info("Starting arbitrary waveform setup (%d segments, CH%d)", len(widths), channel)
         w = self._write
 
-        # CH2 DC mode (same as square mode)
-        w(":INST CH2")
-        w(":FUNCtion:SHAPe DC")
-
-        # CH1 arbitrary mode
-        w(":INST CH1")
+        w(f":INST CH{channel}")
+        # Switch to USER mode first (81180A requires this before trace operations)
+        w(":FUNC:MODE USER")
+        # Clear existing segments to avoid conflicts
+        w(":TRAC:DEL:ALL")
 
         sample_rate, points_per_period = _calc_arb_params(config.frequency, widths)
         logger.info(
@@ -197,22 +206,24 @@ class PulseInstrument:
         w(f":FREQ:RAST {sample_rate}")
 
         # Upload waveform segment for each pulse width
+        inverted = config.v_on < config.v_off
         for i, width in enumerate(widths):
             seg = i + 1
             dcycle = width * config.frequency * 100
-            waveform = _generate_pulse_waveform(points_per_period, dcycle)
+            waveform = _generate_pulse_waveform(
+                points_per_period, dcycle, inverted=inverted,
+            )
             w(f":TRACe:DEF {seg}, {points_per_period}")
             w(f":TRACe:SEL {seg}")
-            # IEEE 488.2 binary block transfer
+            # IEEE 488.2 binary block transfer (little-endian per 81180A spec)
             self.instr.write_binary_values(":TRACe:DATA", waveform, datatype="H")
             logger.debug("Uploaded segment %d: duty=%.2f%%, %d points", seg, dcycle, points_per_period)
 
-        # Select first segment and switch to ARB mode
+        # Select first segment
         w(":TRACe:SEL 1")
-        w(":FUNC:MODE ARB")
 
         # Amplitude / offset (same calculation as square mode)
-        ampl = (config.v_on - config.v_off) / 2
+        ampl = abs(config.v_on - config.v_off) / 2
         offs = (config.v_on + config.v_off) / 4
         w(f":VOLT:AMPLitude {ampl}")
         w(f":VOLT:OFFSet {offs}")
@@ -222,9 +233,15 @@ class PulseInstrument:
         self._query("*OPC?")
         logger.info("Arbitrary waveform setup complete")
 
-    def select_segment(self, index: int) -> None:
+    def select_segment(self, index: int, *, channel: int = 1) -> None:
         """Switch to a pre-uploaded segment (for arbitrary mode sweep)."""
+        self._write(f":INST CH{channel}")
         self._write(f":TRACe:SEL {index + 1}")
+
+    def set_trigger_delay(self, delay: int, *, channel: int = 1) -> None:
+        """Set trigger delay on the specified channel."""
+        self._write(f":INST CH{channel}")
+        self._write(f":TRIGger:DELay {delay}")
 
     # ------------------------------------------------------------------ #
     #  DC 0V (safe state)
@@ -247,22 +264,16 @@ class PulseInstrument:
     # ------------------------------------------------------------------ #
     #  Teardown (based on VBA WaveForm DC switch / SweepTau cleanup)
     # ------------------------------------------------------------------ #
-    def teardown(self) -> None:
-        """Teardown: return outputs to a safe state."""
-        logger.info("Starting teardown")
+    def teardown(self, *, channel: int = 1) -> None:
+        """Teardown: return the specified channel to a safe state."""
+        logger.info("Starting teardown (CH%d)", channel)
         w = self._write
-        # CH1 off (VBA WaveForm L542-543)
-        w(":INST CH1")
+        w(f":INST CH{channel}")
         w(":OUTPut OFF")
         w(":PHASe 0")
         w(":FUNCtion:SHAPe DC")
         w(":DC:OFFSet 0")
-        # CH2 off (VBA SweepTau L126-128)
-        w(":INST CH2")
-        w(":DC:OFFSet 0")
-        # Switch back to CH1 (VBA SweepTau L130)
-        w(":INST CH1")
-        logger.info("Teardown complete")
+        logger.info("Teardown complete (CH%d)", channel)
 
 
 # ================================================================== #
@@ -272,10 +283,10 @@ def run_sweep(
     config: SweepConfig,
     instrument: PulseInstrument,
     callback: Callable[[int, int], None] | None = None,
+    *,
+    channels: list[int] | None = None,
 ) -> None:
     """Execute pulse width sweep.
-
-    Follows the same pattern as VBA SweepTau: Sleep → channel select → update params.
 
     Parameters
     ----------
@@ -283,7 +294,11 @@ def run_sweep(
     instrument : PulseInstrument
     callback : (step_index, total_steps) -> None
         Called after each step for progress reporting.
+    channels : list of channel numbers (1 and/or 2). Defaults to [1].
     """
+    if channels is None:
+        channels = [1]
+
     widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
     total = len(widths)
 
@@ -292,7 +307,8 @@ def run_sweep(
         for i in range(total):
             logger.info("[%d/%d] segment=%d", i + 1, total, i + 1)
             time.sleep(config.wait_time)
-            instrument.select_segment(i)
+            for ch in channels:
+                instrument.select_segment(i, channel=ch)
             if callback is not None:
                 callback(i, total)
         time.sleep(config.wait_time)
@@ -303,14 +319,14 @@ def run_sweep(
         dcycle = width * config.frequency * 100
         logger.info("[%d/%d] width=%.6f s, duty=%.2f%%", i + 1, total, width, dcycle)
 
-        # Same order as VBA: Sleep → update params (SweepTau L94-96)
         time.sleep(config.wait_time)
-        instrument.set_pulse_width(width, config.frequency)
+        for ch in channels:
+            instrument.set_pulse_width(width, config.frequency, channel=ch)
 
         if callback is not None:
             callback(i, total)
 
-    # Final wait (VBA SweepTau L114: Sleep(wait))
+    # Final wait
     time.sleep(config.wait_time)
 
 
@@ -318,3 +334,46 @@ def _generate_widths(start: float, stop: float, step: float) -> list[float]:
     """Generate a list of widths from start to stop with the given step."""
     n = int(round((stop - start) / step)) + 1
     return [round(start + i * step, 10) for i in range(n)]
+
+
+def _generate_delays(start: int, stop: int, step: int) -> list[int]:
+    """Generate a list of trigger delays from start to stop with the given step."""
+    n = (stop - start) // step + 1
+    return [start + i * step for i in range(n)]
+
+
+# ================================================================== #
+#  Delay sweep execution
+# ================================================================== #
+def run_delay_sweep(
+    config: DelaySweepConfig,
+    instrument: PulseInstrument,
+    callback: Callable[[int, int], None] | None = None,
+    *,
+    channels: list[int] | None = None,
+) -> None:
+    """Execute trigger delay sweep.
+
+    Parameters
+    ----------
+    config : DelaySweepConfig
+    instrument : PulseInstrument
+    callback : (step_index, total_steps) -> None
+    channels : list of channel numbers (1 and/or 2). Defaults to [1].
+    """
+    if channels is None:
+        channels = [1]
+
+    delays = _generate_delays(config.delay_start, config.delay_stop, config.delay_step)
+    total = len(delays)
+
+    for i, delay in enumerate(delays):
+        logger.info("[%d/%d] delay=%d points", i + 1, total, delay)
+        time.sleep(config.wait_time)
+        for ch in channels:
+            instrument.set_trigger_delay(delay, channel=ch)
+        if callback is not None:
+            callback(i, total)
+
+    # Final wait
+    time.sleep(config.wait_time)

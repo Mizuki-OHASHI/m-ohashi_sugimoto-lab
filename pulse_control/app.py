@@ -13,8 +13,8 @@ from pathlib import Path
 
 import streamlit as st
 
-from config import DEFAULT_VISA_ADDRESS, PulseConfig, SweepConfig
-from core import PulseInstrument, _generate_widths, run_sweep
+from config import DEFAULT_VISA_ADDRESS, DelaySweepConfig, PulseConfig, SweepConfig
+from core import PulseInstrument, _generate_widths, run_delay_sweep, run_sweep
 from log_setup import setup_logging
 
 DEFAULT_CONFIG = Path("sweep_config.toml")
@@ -62,6 +62,9 @@ def format_si(value: float) -> str:
     return f"{value / factor:g}{prefix}"
 
 
+_CHANNEL_MAP = {"CH1": [1], "CH2": [2], "Both": [1, 2]}
+
+
 # ================================================================== #
 #  Session initialisation
 # ================================================================== #
@@ -97,30 +100,49 @@ def _on_period_change() -> None:
 def _load_config_to_widgets(new_cfg: SweepConfig) -> None:
     """Push SweepConfig values into widget session state."""
     st.session_state.sweep_config = new_cfg
+    # Common fields
+    st.session_state._w_v_on = new_cfg.v_on
+    st.session_state._w_v_off = new_cfg.v_off
+    st.session_state._w_freq = format_si(new_cfg.frequency)
+    if new_cfg.frequency > 0:
+        st.session_state._w_period = format_si(1.0 / new_cfg.frequency)
+    st.session_state._w_trigger_delay = new_cfg.trigger_delay
+    # Sweep-specific fields
     st.session_state._w_width_start = format_si(new_cfg.width_start)
     st.session_state._w_width_stop = format_si(new_cfg.width_stop)
     st.session_state._w_width_step = format_si(new_cfg.width_step)
     st.session_state._w_wait_time = format_si(new_cfg.wait_time)
-    st.session_state._w_freq = format_si(new_cfg.frequency)
-    if new_cfg.frequency > 0:
-        st.session_state._w_period = format_si(1.0 / new_cfg.frequency)
+    # Pulse width defaults to width_start
+    st.session_state._w_pulse_width = format_si(new_cfg.width_start)
 
 
 # ================================================================== #
-#  Sidebar: title + mode + connection + TOML import/export
+#  Instrument helpers (shared connection, per-channel state)
+# ================================================================== #
+def _get_instrument(visa_addr: str) -> PulseInstrument:
+    """Get or create the shared instrument connection."""
+    if "instrument" not in st.session_state:
+        st.session_state.instrument = PulseInstrument(visa_addr)
+    return st.session_state.instrument
+
+
+def _close_instrument_if_idle() -> None:
+    """Close instrument if no channel is running."""
+    if not st.session_state.get("ch1_running") and not st.session_state.get("ch2_running"):
+        inst = st.session_state.pop("instrument", None)
+        if inst is not None:
+            try:
+                inst.close()
+            except Exception:
+                pass
+
+
+# ================================================================== #
+#  Sidebar: title + connection + DC 0V + TOML import
 # ================================================================== #
 with st.sidebar:
     st.header("Pulse Control")
     st.caption("Agilent 81180A AWG")
-
-    st.divider()
-    _MODE_MAP = {"pulse": "Simple Pulse", "sweep": "Pulse Width Sweep"}
-    mode = st.radio(
-        "Operation Mode",
-        ["pulse", "sweep"],
-        format_func=lambda x: _MODE_MAP[x],
-        horizontal=True,
-    )
 
     st.divider()
     st.markdown("**Connection**")
@@ -163,188 +185,222 @@ with st.sidebar:
     st.divider()
     st.markdown("**TOML Config**")
 
-    if mode == "sweep":
-        uploaded = st.file_uploader("Import TOML", type=["toml"])
-        if uploaded is not None:
-            upload_id = f"{uploaded.name}_{uploaded.size}"
-            if st.session_state.get("_last_upload_id") != upload_id:
-                st.session_state._last_upload_id = upload_id
-                with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as tmp:
-                    tmp.write(uploaded.read())
-                    tmp.flush()
+    uploaded = st.file_uploader("Import TOML", type=["toml"])
+    if uploaded is not None:
+        upload_id = f"{uploaded.name}_{uploaded.size}"
+        if st.session_state.get("_last_upload_id") != upload_id:
+            st.session_state._last_upload_id = upload_id
+            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as tmp:
+                tmp.write(uploaded.read())
+                tmp.flush()
+                try:
                     _load_config_to_widgets(SweepConfig.from_toml(tmp.name))
-                st.rerun()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Import failed: {exc}")
 
 
 # ================================================================== #
-#  Main: parameter inputs
+#  Main: Common parameters (always visible)
 # ================================================================== #
-parse_errors: list[str] = []
+col_volt, col_timing = st.columns(2)
 
-if mode == "pulse":
-    # ---- Simple Pulse mode ----
-    col1, col2 = st.columns(2)
+with col_volt:
+    v_on = st.number_input("V_on [V]", value=sweep_cfg.v_on, format="%.4f", key="_w_v_on")
+    v_off = st.number_input("V_off [V]", value=sweep_cfg.v_off, format="%.4f", key="_w_v_off")
 
-    with col1:
-        st.subheader("Pulse")
-        v_on = st.number_input("V_on [V]", value=sweep_cfg.v_on, format="%.4f", key="_p_v_on")
-        v_off = st.number_input("V_off [V]", value=sweep_cfg.v_off, format="%.4f", key="_p_v_off")
-        freq_col, period_col = st.columns(2)
-        with freq_col:
-            st.text_input(
-                "Frequency [Hz]",
-                value=format_si(sweep_cfg.frequency),
-                key="_w_freq",
-                on_change=_on_freq_change,
-            )
-        with period_col:
-            st.text_input(
-                "Period [s]",
-                value=format_si(1.0 / sweep_cfg.frequency),
-                key="_w_period",
-                on_change=_on_period_change,
-            )
+with col_timing:
+    freq_col, period_col = st.columns(2)
+    with freq_col:
+        st.text_input(
+            "Frequency [Hz]",
+            value=format_si(sweep_cfg.frequency),
+            key="_w_freq",
+            on_change=_on_freq_change,
+        )
+    with period_col:
+        st.text_input(
+            "Period [s]",
+            value=format_si(1.0 / sweep_cfg.frequency),
+            key="_w_period",
+            on_change=_on_period_change,
+        )
+    trigger_delay = st.number_input(
+        "Trigger Delay [points] (multiple of 8)",
+        value=sweep_cfg.trigger_delay, min_value=0, step=8,
+        key="_w_trigger_delay",
+    )
 
-    with col2:
-        st.subheader("Parameters")
+# Parse common SI fields
+common_parse_errors: list[str] = []
+common_parsed: dict[str, float] = {}
+
+try:
+    common_parsed["frequency"] = parse_si(st.session_state._w_freq)
+except (ValueError, KeyError):
+    common_parse_errors.append(
+        f"frequency: invalid value \"{st.session_state.get('_w_freq', '')}\""
+    )
+
+# ================================================================== #
+#  Tabs: mode-specific UI
+# ================================================================== #
+pulse_config: PulseConfig | None = None
+sweep_config_built: SweepConfig | None = None
+delay_config_built: DelaySweepConfig | None = None
+
+tab_pulse, tab_sweep, tab_delay = st.tabs(["Simple Pulse", "Width Sweep", "Delay Sweep"])
+
+# ================================================================== #
+#  Simple Pulse tab
+# ================================================================== #
+with tab_pulse:
+    _p_col1, _p_col2 = st.columns(2)
+    with _p_col1:
         st.text_input(
             "Pulse Width [s]",
             value=format_si(sweep_cfg.width_start),
             key="_w_pulse_width",
         )
-        trigger_delay = st.number_input(
-            "Trigger Delay [points] (multiple of 8)",
-            value=sweep_cfg.trigger_delay, min_value=0, step=8,
-            key="_p_trigger_delay",
+    with _p_col2:
+        _PULSE_WAVEFORM_LABELS = {"square": "Square", "arbitrary": "Arbitrary"}
+        pulse_waveform_mode = st.radio(
+            "Waveform Mode",
+            ["square", "arbitrary"],
+            format_func=lambda x: _PULSE_WAVEFORM_LABELS[x],
+            horizontal=True,
+            key="_pulse_waveform_mode",
         )
 
-    # Parse SI text fields
-    _SI_FIELDS_PULSE = {
-        "frequency": "_w_freq",
-        "pulse_width": "_w_pulse_width",
-    }
+    # Parse pulse-specific fields
+    pulse_parse_errors = list(common_parse_errors)
+    try:
+        pulse_width_val = parse_si(st.session_state._w_pulse_width)
+    except (ValueError, KeyError):
+        pulse_width_val = None
+        pulse_parse_errors.append(
+            f"pulse_width: invalid value \"{st.session_state.get('_w_pulse_width', '')}\""
+        )
 
-    parsed: dict[str, float] = {}
-    for name, key in _SI_FIELDS_PULSE.items():
-        try:
-            parsed[name] = parse_si(st.session_state[key])
-        except (ValueError, KeyError):
-            parse_errors.append(f"{name}: invalid value \"{st.session_state.get(key, '')}\"")
-
-    # Build config
-    def _build_pulse_config() -> PulseConfig | None:
-        if parse_errors:
-            return None
-        return PulseConfig(
+    # Build pulse config
+    if not pulse_parse_errors and pulse_width_val is not None:
+        pulse_config = PulseConfig(
             visa_address=visa_address,
             v_on=v_on,
             v_off=v_off,
-            frequency=parsed["frequency"],
+            frequency=common_parsed["frequency"],
             trigger_delay=int(trigger_delay),
-            pulse_width=parsed["pulse_width"],
+            pulse_width=pulse_width_val,
+            waveform_mode=pulse_waveform_mode,
         )
 
-    config_or_none = _build_pulse_config()
-
-    # TOML export
-    with st.sidebar:
-        if config_or_none is not None:
-            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
-                config_or_none.to_toml(tmp.name)
-                with open(tmp.name) as f:
-                    toml_str = f.read()
-            st.download_button(
-                "Export TOML",
-                data=toml_str,
-                file_name="pulse_config.toml",
-                mime="text/plain",
-            )
-
     # Validation
-    errors = list(parse_errors)
-    if config_or_none is not None:
-        errors.extend(config_or_none.validate())
+    errors_pulse = list(pulse_parse_errors)
+    if pulse_config is not None:
+        errors_pulse.extend(pulse_config.validate())
 
-    st.divider()
-    if errors:
-        msg = "Configuration error:\n" + "\n".join(f"- {e}" for e in errors)
-        st.error(msg)
+    if errors_pulse:
+        st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_pulse))
     else:
         st.success("Parameters OK")
 
-    # Run pulse
-    is_running = "pulse_instrument" in st.session_state
+    # Per-channel Start/Stop buttons
+    ch1_running = st.session_state.get("ch1_running", False)
+    ch2_running = st.session_state.get("ch2_running", False)
+    can_start = not bool(errors_pulse) and bool(visa_address)
 
-    col_start, col_stop = st.columns(2)
-    with col_start:
-        start_pulse = st.button(
-            "Start Pulse",
-            disabled=bool(errors) or not visa_address or is_running,
-            type="primary",
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        start_ch1 = st.button(
+            "Start CH1", disabled=not can_start or ch1_running,
+            type="primary", use_container_width=True,
+        )
+    with c2:
+        stop_ch1 = st.button(
+            "Stop CH1", disabled=not ch1_running,
             use_container_width=True,
         )
-    with col_stop:
-        stop_pulse = st.button(
-            "Stop Pulse",
-            disabled=not is_running,
+    with c3:
+        start_ch2 = st.button(
+            "Start CH2", disabled=not can_start or ch2_running,
+            type="primary", use_container_width=True,
+        )
+    with c4:
+        stop_ch2 = st.button(
+            "Stop CH2", disabled=not ch2_running,
             use_container_width=True,
         )
 
-    if start_pulse:
-        config = _build_pulse_config()
+    # Start CH1
+    if start_ch1 and pulse_config is not None:
         try:
-            instrument = PulseInstrument(config.visa_address)
-            instrument.setup(config, config.pulse_width)
-            st.session_state.pulse_instrument = instrument
-            logger.info("Pulse output started via UI")
+            inst = _get_instrument(pulse_config.visa_address)
+            if pulse_config.waveform_mode == "arbitrary":
+                inst.setup_arbitrary(
+                    pulse_config, [pulse_config.pulse_width], channel=1,
+                )
+            else:
+                inst.setup(pulse_config, pulse_config.pulse_width, channel=1)
+            st.session_state.ch1_running = True
+            logger.info("Pulse CH1 started via UI (%s)", pulse_config.waveform_mode)
             st.rerun()
         except Exception as exc:
             st.error(f"Error: {exc}")
-            logger.exception("Error starting pulse")
+            logger.exception("Error starting pulse CH1")
 
-    if stop_pulse and is_running:
+    # Start CH2
+    if start_ch2 and pulse_config is not None:
         try:
-            st.session_state.pulse_instrument.teardown()
+            inst = _get_instrument(pulse_config.visa_address)
+            if pulse_config.waveform_mode == "arbitrary":
+                inst.setup_arbitrary(
+                    pulse_config, [pulse_config.pulse_width], channel=2,
+                )
+            else:
+                inst.setup(pulse_config, pulse_config.pulse_width, channel=2)
+            st.session_state.ch2_running = True
+            logger.info("Pulse CH2 started via UI (%s)", pulse_config.waveform_mode)
+            st.rerun()
         except Exception as exc:
-            logger.error("Teardown error: %s", exc)
-        finally:
-            try:
-                st.session_state.pulse_instrument.close()
-            except Exception:
-                pass
-            del st.session_state.pulse_instrument
-        logger.info("Pulse output stopped via UI")
+            st.error(f"Error: {exc}")
+            logger.exception("Error starting pulse CH2")
+
+    # Stop CH1
+    if stop_ch1 and ch1_running:
+        try:
+            st.session_state.instrument.teardown(channel=1)
+        except Exception as exc:
+            logger.error("Teardown CH1 error: %s", exc)
+        st.session_state.ch1_running = False
+        _close_instrument_if_idle()
+        logger.info("Pulse CH1 stopped via UI")
         st.rerun()
 
-    if is_running:
-        st.info("Pulse output is ON.")
+    # Stop CH2
+    if stop_ch2 and ch2_running:
+        try:
+            st.session_state.instrument.teardown(channel=2)
+        except Exception as exc:
+            logger.error("Teardown CH2 error: %s", exc)
+        st.session_state.ch2_running = False
+        _close_instrument_if_idle()
+        logger.info("Pulse CH2 stopped via UI")
+        st.rerun()
 
-else:
-    # ---- Sweep mode ----
-    col1, col2, col3 = st.columns(3)
+    # Status
+    if ch1_running:
+        st.info("CH1: Pulse output is ON.")
+    if ch2_running:
+        st.info("CH2: Pulse output is ON.")
 
-    with col1:
-        st.subheader("Pulse")
-        v_on = st.number_input("V_on [V]", value=sweep_cfg.v_on, format="%.4f")
-        v_off = st.number_input("V_off [V]", value=sweep_cfg.v_off, format="%.4f")
-        freq_col, period_col = st.columns(2)
-        with freq_col:
-            st.text_input(
-                "Frequency [Hz]",
-                value=format_si(sweep_cfg.frequency),
-                key="_w_freq",
-                on_change=_on_freq_change,
-            )
-        with period_col:
-            st.text_input(
-                "Period [s]",
-                value=format_si(1.0 / sweep_cfg.frequency),
-                key="_w_period",
-                on_change=_on_period_change,
-            )
 
-    with col2:
-        st.subheader("Sweep Range")
+# ================================================================== #
+#  Width Sweep tab
+# ================================================================== #
+with tab_sweep:
+    col_range, col_step, col_opts = st.columns(3)
+
+    with col_range:
         st.text_input(
             "Width Start [s]",
             value=format_si(sweep_cfg.width_start),
@@ -355,25 +411,20 @@ else:
             value=format_si(sweep_cfg.width_stop),
             key="_w_width_stop",
         )
+
+    with col_step:
         st.text_input(
             "Width Step [s]",
             value=format_si(sweep_cfg.width_step),
             key="_w_width_step",
         )
-
-    with col3:
-        st.subheader("Trigger")
-        trigger_delay = st.number_input(
-            "Trigger Delay [points] (multiple of 8)",
-            value=sweep_cfg.trigger_delay, min_value=0, step=8,
-        )
-
-        st.subheader("Sweep Control")
         st.text_input(
             "Wait Time [s]",
             value=format_si(sweep_cfg.wait_time),
             key="_w_wait_time",
         )
+
+    with col_opts:
         _WAVEFORM_LABELS = {"square": "Square", "arbitrary": "Arbitrary (glitch-free)"}
         waveform_mode = st.radio(
             "Waveform Mode",
@@ -381,78 +432,59 @@ else:
             format_func=lambda x: _WAVEFORM_LABELS[x],
             horizontal=True,
         )
+        sweep_channel = st.radio(
+            "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_sweep_ch",
+        )
         st.info("Pulse center is fixed at the middle of the period during sweep.")
 
-    # Parse SI text fields
-    _SI_FIELDS_SWEEP = {
-        "frequency": "_w_freq",
+    # Parse sweep-specific fields
+    sweep_parse_errors = list(common_parse_errors)
+    sweep_parsed = dict(common_parsed)
+
+    for name, key in {
         "width_start": "_w_width_start",
         "width_stop": "_w_width_stop",
         "width_step": "_w_width_step",
         "wait_time": "_w_wait_time",
-    }
-
-    parsed: dict[str, float] = {}
-    for name, key in _SI_FIELDS_SWEEP.items():
+    }.items():
         try:
-            parsed[name] = parse_si(st.session_state[key])
+            sweep_parsed[name] = parse_si(st.session_state[key])
         except (ValueError, KeyError):
-            parse_errors.append(f"{name}: invalid value \"{st.session_state.get(key, '')}\"")
+            sweep_parse_errors.append(
+                f"{name}: invalid value \"{st.session_state.get(key, '')}\""
+            )
 
-    try:
-        parsed["period"] = parse_si(st.session_state["_w_period"])
-    except (ValueError, KeyError):
-        parse_errors.append(f"period: invalid value \"{st.session_state.get('_w_period', '')}\"")
-
-    # Build config
-    def _build_sweep_config() -> SweepConfig | None:
-        if parse_errors:
-            return None
-        return SweepConfig(
+    # Build sweep config
+    if not sweep_parse_errors:
+        sweep_config_built = SweepConfig(
             visa_address=visa_address,
             v_on=v_on,
             v_off=v_off,
-            width_start=parsed["width_start"],
-            width_stop=parsed["width_stop"],
-            width_step=parsed["width_step"],
-            frequency=parsed["frequency"],
+            width_start=sweep_parsed["width_start"],
+            width_stop=sweep_parsed["width_stop"],
+            width_step=sweep_parsed["width_step"],
+            frequency=sweep_parsed["frequency"],
             trigger_delay=int(trigger_delay),
-            wait_time=parsed["wait_time"],
+            wait_time=sweep_parsed["wait_time"],
             waveform_mode=waveform_mode,
         )
 
-    config_or_none = _build_sweep_config()
-
-    # TOML export
-    with st.sidebar:
-        if config_or_none is not None:
-            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
-                config_or_none.to_toml(tmp.name)
-                with open(tmp.name) as f:
-                    toml_str = f.read()
-            st.download_button(
-                "Export TOML",
-                data=toml_str,
-                file_name="sweep_config.toml",
-                mime="text/plain",
-            )
-
     # Validation
-    errors = list(parse_errors)
-    if config_or_none is not None:
-        errors.extend(config_or_none.validate())
+    errors_sweep = list(sweep_parse_errors)
+    if sweep_config_built is not None:
+        errors_sweep.extend(sweep_config_built.validate())
 
-    st.divider()
-    if errors:
-        msg = "Configuration error:\n" + "\n".join(f"- {e}" for e in errors)
-        st.error(msg)
+    if errors_sweep:
+        st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_sweep))
     else:
         st.success("Parameters OK")
 
     # Run sweep
-    if st.button("Start Sweep", disabled=bool(errors) or not visa_address, type="primary"):
-        config = _build_sweep_config()
-        logger.info("Sweep started")
+    if st.button("Start Sweep", disabled=bool(errors_sweep) or not visa_address, type="primary",
+                  key="_btn_start_width_sweep"):
+        config = sweep_config_built
+        channels = _CHANNEL_MAP[sweep_channel]
+        logger.info("Width sweep started (channels=%s)", channels)
         progress = st.progress(0, text="Connecting...")
 
         instrument = None
@@ -460,25 +492,208 @@ else:
             instrument = PulseInstrument(config.visa_address)
             progress.progress(0, text="Setting up instrument...")
 
-            if config.waveform_mode == "arbitrary":
-                widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
-                instrument.setup_arbitrary(config, widths)
-            else:
-                instrument.setup(config, config.width_start)
+            for ch in channels:
+                if config.waveform_mode == "arbitrary":
+                    widths = _generate_widths(
+                        config.width_start, config.width_stop, config.width_step,
+                    )
+                    instrument.setup_arbitrary(config, widths, channel=ch)
+                else:
+                    instrument.setup(config, config.width_start, channel=ch)
 
             def on_step(i: int, total: int) -> None:
                 pct = (i + 1) / total
                 progress.progress(pct, text=f"Sweeping... {i + 1}/{total}")
 
-            run_sweep(config, instrument, callback=on_step)
-            instrument.teardown()
+            run_sweep(config, instrument, callback=on_step, channels=channels)
+
+            for ch in channels:
+                instrument.teardown(channel=ch)
 
             progress.progress(1.0, text="Done!")
-            logger.info("Sweep completed")
+            logger.info("Width sweep completed")
 
         except Exception as exc:
             st.error(f"Error: {exc}")
-            logger.exception("Error during sweep")
+            logger.exception("Error during width sweep")
         finally:
             if instrument is not None:
                 instrument.close()
+
+
+# ================================================================== #
+#  Delay Sweep tab
+# ================================================================== #
+with tab_delay:
+    col_d1, col_d2, col_d3 = st.columns(3)
+
+    with col_d1:
+        st.text_input(
+            "Pulse Width [s]",
+            value=format_si(sweep_cfg.width_start),
+            key="_w_delay_pulse_width",
+        )
+        st.number_input(
+            "Delay Start [points] (×8)",
+            value=0, min_value=0, step=8,
+            key="_w_delay_start",
+        )
+
+    with col_d2:
+        st.number_input(
+            "Delay Stop [points] (×8)",
+            value=80, min_value=0, step=8,
+            key="_w_delay_stop",
+        )
+        st.number_input(
+            "Delay Step [points] (×8)",
+            value=8, min_value=8, step=8,
+            key="_w_delay_step",
+        )
+
+    with col_d3:
+        st.text_input(
+            "Wait Time [s]",
+            value=format_si(sweep_cfg.wait_time),
+            key="_w_delay_wait_time",
+        )
+        _DELAY_WAVEFORM_LABELS = {"square": "Square", "arbitrary": "Arbitrary"}
+        delay_waveform_mode = st.radio(
+            "Waveform Mode",
+            ["square", "arbitrary"],
+            format_func=lambda x: _DELAY_WAVEFORM_LABELS[x],
+            horizontal=True,
+            key="_delay_waveform_mode",
+        )
+        delay_channel = st.radio(
+            "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_delay_ch",
+        )
+
+    # Parse delay-specific fields
+    delay_parse_errors = list(common_parse_errors)
+    delay_parsed = dict(common_parsed)
+
+    try:
+        delay_parsed["pulse_width"] = parse_si(st.session_state._w_delay_pulse_width)
+    except (ValueError, KeyError):
+        delay_parse_errors.append(
+            f"pulse_width: invalid value \"{st.session_state.get('_w_delay_pulse_width', '')}\""
+        )
+    try:
+        delay_parsed["wait_time"] = parse_si(st.session_state._w_delay_wait_time)
+    except (ValueError, KeyError):
+        delay_parse_errors.append(
+            f"wait_time: invalid value \"{st.session_state.get('_w_delay_wait_time', '')}\""
+        )
+
+    delay_start_val = st.session_state.get("_w_delay_start", 0)
+    delay_stop_val = st.session_state.get("_w_delay_stop", 80)
+    delay_step_val = st.session_state.get("_w_delay_step", 8)
+
+    # Build delay sweep config
+    if not delay_parse_errors:
+        delay_config_built = DelaySweepConfig(
+            visa_address=visa_address,
+            v_on=v_on,
+            v_off=v_off,
+            frequency=delay_parsed["frequency"],
+            trigger_delay=int(delay_start_val),
+            pulse_width=delay_parsed["pulse_width"],
+            delay_start=int(delay_start_val),
+            delay_stop=int(delay_stop_val),
+            delay_step=int(delay_step_val),
+            wait_time=delay_parsed["wait_time"],
+            waveform_mode=delay_waveform_mode,
+        )
+
+    # Validation
+    errors_delay = list(delay_parse_errors)
+    if delay_config_built is not None:
+        errors_delay.extend(delay_config_built.validate())
+
+    if errors_delay:
+        st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_delay))
+    else:
+        st.success("Parameters OK")
+
+    # Run delay sweep
+    if st.button("Start Delay Sweep", disabled=bool(errors_delay) or not visa_address,
+                  type="primary", key="_btn_start_delay_sweep"):
+        config = delay_config_built
+        channels = _CHANNEL_MAP[delay_channel]
+        logger.info("Delay sweep started (channels=%s)", channels)
+        progress = st.progress(0, text="Connecting...")
+
+        instrument = None
+        try:
+            instrument = PulseInstrument(config.visa_address)
+            progress.progress(0, text="Setting up instrument...")
+
+            for ch in channels:
+                if config.waveform_mode == "arbitrary":
+                    instrument.setup_arbitrary(
+                        config, [config.pulse_width], channel=ch,
+                    )
+                else:
+                    instrument.setup(config, config.pulse_width, channel=ch)
+
+            def on_delay_step(i: int, total: int) -> None:
+                pct = (i + 1) / total
+                progress.progress(pct, text=f"Sweeping... {i + 1}/{total}")
+
+            run_delay_sweep(config, instrument, callback=on_delay_step, channels=channels)
+
+            for ch in channels:
+                instrument.teardown(channel=ch)
+
+            progress.progress(1.0, text="Done!")
+            logger.info("Delay sweep completed")
+
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+            logger.exception("Error during delay sweep")
+        finally:
+            if instrument is not None:
+                instrument.close()
+
+
+# ================================================================== #
+#  Sidebar: TOML export (after configs are built)
+# ================================================================== #
+with st.sidebar:
+    if pulse_config is not None:
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
+            pulse_config.to_toml(tmp.name)
+            with open(tmp.name) as f:
+                toml_str = f.read()
+        st.download_button(
+            "Export Pulse TOML",
+            data=toml_str,
+            file_name="pulse_config.toml",
+            mime="text/plain",
+            key="_export_pulse",
+        )
+    if sweep_config_built is not None:
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
+            sweep_config_built.to_toml(tmp.name)
+            with open(tmp.name) as f:
+                toml_str = f.read()
+        st.download_button(
+            "Export Sweep TOML",
+            data=toml_str,
+            file_name="sweep_config.toml",
+            mime="text/plain",
+            key="_export_sweep",
+        )
+    if delay_config_built is not None:
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
+            delay_config_built.to_toml(tmp.name)
+            with open(tmp.name) as f:
+                toml_str = f.read()
+        st.download_button(
+            "Export Delay TOML",
+            data=toml_str,
+            file_name="delay_sweep_config.toml",
+            mime="text/plain",
+            key="_export_delay",
+        )
