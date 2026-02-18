@@ -302,11 +302,27 @@ def run_sweep(
     widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
     total = len(widths)
 
+    # Delay sweep parameters
+    delay_start = config.trigger_delay
+    delay_stop = config.trigger_delay_stop
+    sweep_delay = delay_stop is not None and delay_stop != delay_start
+
+    def _apply_delay(i: int) -> None:
+        """Interpolate and apply trigger delay for step *i*."""
+        if not sweep_delay:
+            return
+        frac = i / max(total - 1, 1)
+        raw = delay_start + (delay_stop - delay_start) * frac
+        delay = round(raw / 8) * 8
+        for ch in channels:
+            instrument.set_trigger_delay(delay, channel=ch)
+
     # --- Arbitrary mode: switch pre-uploaded segments ---
     if config.waveform_mode == "arbitrary":
         for i in range(total):
             logger.info("[%d/%d] segment=%d", i + 1, total, i + 1)
             time.sleep(config.wait_time)
+            _apply_delay(i)
             for ch in channels:
                 instrument.select_segment(i, channel=ch)
             if callback is not None:
@@ -320,6 +336,7 @@ def run_sweep(
         logger.info("[%d/%d] width=%.6f s, duty=%.2f%%", i + 1, total, width, dcycle)
 
         time.sleep(config.wait_time)
+        _apply_delay(i)
         for ch in channels:
             instrument.set_pulse_width(width, config.frequency, channel=ch)
 
