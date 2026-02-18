@@ -4,18 +4,17 @@ Usage
 python main.py [config_path] [log_path]
 """
 
-import sys
 import shutil
+import sys
 from dataclasses import asdict
-from logging import basicConfig, INFO, getLogger
+from logging import INFO, basicConfig, getLogger
 from pathlib import Path
-import toml
 
+import toml
+from fem import SimulationParameters, run_fem
+from geometry import GeometricParameters, create_mesh
 from load_config import load_config
 from physical_parameters import PhysicalParameters
-from geometry import GeometricParameters, create_mesh
-from fem import SimulationParameters, run_fem
-
 
 logger = getLogger(__name__)
 

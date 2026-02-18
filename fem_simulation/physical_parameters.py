@@ -1,10 +1,10 @@
+from dataclasses import asdict, dataclass, field
 from logging import getLogger
-from dataclasses import dataclass, asdict, field
+
 import numpy as np
 import scipy.constants as const
-from scipy.optimize import brentq
-
 from fermi_dirac_integral import F_half_aymerich_humet_np
+from scipy.optimize import brentq
 
 logger = getLogger(__name__)
 

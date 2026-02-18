@@ -1,5 +1,5 @@
 import numpy as np
-from ngsolve import sqrt, exp, IfPos
+from ngsolve import IfPos, exp, sqrt
 
 a = 9.6
 b = 2.13

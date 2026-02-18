@@ -1,14 +1,13 @@
-from pathlib import Path
+from dataclasses import dataclass
 from logging import getLogger
-from dataclasses import dataclass, asdict
+from pathlib import Path
+
 import ngsolve as ng
 import numpy as np
 import scipy.constants as const
-
 from fermi_dirac_integral import F_half_aymerich_humet_ng
-from physical_parameters import PhysicalParameters
 from geometry import GeometricParameters
-
+from physical_parameters import PhysicalParameters
 
 logger = getLogger(__name__)
 
@@ -208,10 +207,10 @@ def _solve_newton(
         )
         if converged >= 0:
             logger.info(
-                f"  homotopy step {step+1}/{n_hmtp_steps} converged in {iter} iterations."
+                f"  homotopy step {step + 1}/{n_hmtp_steps} converged in {iter} iterations."
             )
         else:
-            logger.error(f"  homotopy step {step+1}/{n_hmtp_steps} did not converge.")
+            logger.error(f"  homotopy step {step + 1}/{n_hmtp_steps} did not converge.")
             raise RuntimeError("Newton solver did not converge even with homotopy.")
     logger.info("Newton solver converged with homotopy method.")
 

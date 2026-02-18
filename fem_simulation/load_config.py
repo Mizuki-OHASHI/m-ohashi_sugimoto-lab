@@ -1,6 +1,7 @@
-import toml
+from dataclasses import dataclass
 from logging import getLogger
-from dataclasses import dataclass, asdict
+
+import toml
 
 logger = getLogger(__name__)
 

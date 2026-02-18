@@ -1,8 +1,8 @@
-# %%
+from logging import DEBUG, basicConfig
 from pprint import pprint
 
-# %%
-from logging import basicConfig, DEBUG
+from geometry import GeometricParameters, create_mesh
+from physical_parameters import PhysicalParameters
 
 basicConfig(
     level=DEBUG,
@@ -10,17 +10,9 @@ basicConfig(
     force=True,
 )
 
-# %%
-from physical_parameters import PhysicalParameters
-
 params = PhysicalParameters()
 pprint(params)
-
-# %%
-from geometry import GeometricParameters, create_mesh
 
 geom = GeometricParameters(tip_sample_distance=5.0e-9)
 pprint(geom)
 mesh = create_mesh(geom)
-
-# %%

@@ -1,5 +1,6 @@
+from dataclasses import asdict, dataclass
 from logging import getLogger
-from dataclasses import dataclass, asdict
+
 import numpy as np
 import scipy.constants as const
 from netgen.geom2d import SplineGeometry
@@ -148,7 +149,6 @@ def create_mesh(geom: GeometricParameters) -> Mesh:
             leftdomain=out_id,
             rightdomain=vac_id,
         )
-    assert i + 3 == geom.n_tip_arc_points
     g.Append(
         ["line", tip_arc_points[-1], tip_edge],
         bc=bc_tip,

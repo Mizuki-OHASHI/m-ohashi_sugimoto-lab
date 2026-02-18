@@ -1,9 +1,6 @@
 toml
 numpy
 scipy
-
 ngsolve==6.2.2506
-
 matplotlib
-
 pyvisa
