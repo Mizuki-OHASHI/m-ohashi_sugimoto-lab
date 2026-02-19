@@ -102,6 +102,7 @@ def _show_arb_info(frequency: float, widths: list[float], *, resolution_n: int =
             "time_per_point": f"{format_si(tpp)}s",
             "delay_resolution (×8)": f"{format_si(delay_step_time)}s",
             "total_memory": f"{total_memory:,} words",
+            "phase_shift": "Pulse center is fixed at the middle of the period during sweep."
         })
 
 
@@ -173,7 +174,7 @@ def _load_config_to_widgets(data: dict) -> None:
 
     # Simple Pulse
     st.session_state._w_pulse_width = format_si(sp.get("pulse_width", 1e-8))
-    st.session_state._pulse_waveform_mode = sp.get("waveform_mode", "square")
+    # waveform_mode is always "arbitrary" (square mode removed)
 
     # Width Sweep
     st.session_state._w_width_start = format_si(ws.get("width_start", 1e-8))
@@ -181,12 +182,12 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_width_step = format_si(ws.get("width_step", 5e-9))
     st.session_state._w_wait_time = format_si(ws.get("wait_time", 1.0))
     st.session_state._w_settling_time = ws.get("settling_time", 0.0)
-    st.session_state._sweep_waveform_mode = ws.get("waveform_mode", "square")
+    # waveform_mode is always "arbitrary" (square mode removed)
     td_stop = ws.get("trigger_delay_stop")
     st.session_state._w_trigger_delay_stop = (
         td_stop if td_stop is not None else common.get("trigger_delay", 0)
     )
-    st.session_state._w_delay_interp = ws.get("delay_interp", "linear")
+    st.session_state._w_delay_exponent = ws.get("delay_exponent", 1.0)
 
     # Delay Sweep
     st.session_state._w_delay_pulse_width = format_si(ds.get("pulse_width", 1e-8))
@@ -195,7 +196,7 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_delay_step = ds.get("delay_step", 8)
     st.session_state._w_delay_wait_time = format_si(ds.get("wait_time", 1.0))
     st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
-    st.session_state._delay_waveform_mode = ds.get("waveform_mode", "square")
+    # waveform_mode is always "arbitrary" (square mode removed)
 
 
 # Process pending import BEFORE any widgets are instantiated
@@ -232,10 +233,7 @@ def _pulse_start(config: PulseConfig, channel: int) -> None:
         close_after = True
 
     try:
-        if config.waveform_mode == "arbitrary":
-            inst.setup_arbitrary(config, [config.pulse_width], channel=channel)
-        else:
-            inst.setup(config, config.pulse_width, channel=channel)
+        inst.setup_arbitrary(config, [config.pulse_width], channel=channel)
     except Exception:
         if close_after:
             inst.close()
@@ -363,17 +361,19 @@ with st.sidebar:
 # ================================================================== #
 #  Main: Common parameters (always visible)
 # ================================================================== #
-col_volt, col_timing = st.columns(2)
+col_left, col_right = st.columns(2)
 
-with col_volt:
-    v_on = st.number_input(
-        "V_on [V]", value=_common.get("v_on", 0.0), format="%.4f", key="_w_v_on",
-    )
-    v_off = st.number_input(
-        "V_off [V]", value=_common.get("v_off", -1.0), format="%.4f", key="_w_v_off",
-    )
-
-with col_timing:
+with col_left:
+    st.text("Voltage Levels and Timing")
+    col_volt_left, col_volt_right = st.columns(2) 
+    with col_volt_left:
+        v_on = st.number_input(
+            "V_on [V]", value=_common.get("v_on", 0.0), format="%.4f", key="_w_v_on",
+        )
+    with col_volt_right:
+        v_off = st.number_input(
+            "V_off [V]", value=_common.get("v_off", -1.0), format="%.4f", key="_w_v_off",
+        )
     freq_col, period_col = st.columns(2)
     with freq_col:
         st.text_input(
@@ -390,6 +390,9 @@ with col_timing:
             key="_w_period",
             on_change=_on_period_change,
         )
+
+with col_right:
+    st.text("Trigger Delay")
     trigger_delay = st.number_input(
         "Trigger Delay [points] (multiple of 8)",
         value=_common.get("trigger_delay", 0), min_value=0, step=8,
@@ -437,15 +440,7 @@ with tab_pulse:
             value=format_si(_sp.get("pulse_width", 1e-8)),
             key="_w_pulse_width",
         )
-    with _p_col2:
-        _PULSE_WAVEFORM_LABELS = {"square": "Square", "arbitrary": "Arbitrary"}
-        pulse_waveform_mode = st.radio(
-            "Waveform Mode",
-            ["square", "arbitrary"],
-            format_func=lambda x: _PULSE_WAVEFORM_LABELS[x],
-            horizontal=True,
-            key="_pulse_waveform_mode",
-        )
+    pulse_waveform_mode = "arbitrary"
 
     # Parse pulse-specific fields
     pulse_parse_errors = list(common_parse_errors)
@@ -479,7 +474,7 @@ with tab_pulse:
         st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_pulse))
     else:
         st.success("Parameters OK")
-        if pulse_config is not None and pulse_config.waveform_mode == "arbitrary":
+        if pulse_config is not None:
             _show_arb_info(pulse_config.frequency, [pulse_config.pulse_width], resolution_n=resolution_n)
 
     # Per-channel Start/Stop buttons
@@ -550,7 +545,7 @@ with tab_pulse:
         st.rerun()
 
     # Live Connection toggle
-    st.divider()
+    # st.divider()
     st.toggle(
         "Live Connection",
         value=st.session_state.get("live_connection", False),
@@ -657,28 +652,21 @@ with tab_sweep:
                  "Set equal to Trigger Delay for fixed delay.",
             key="_w_trigger_delay_stop",
         )
-        _INTERP_LABELS = {"linear": "Linear", "inverse_width": "1 / pulse width"}
-        delay_interp = st.radio(
-            "Delay Interpolation",
-            ["linear", "inverse_width"],
-            format_func=lambda x: _INTERP_LABELS[x],
-            horizontal=True,
-            key="_w_delay_interp",
-        )
-        st.info("Pulse center is fixed at the middle of the period during sweep.")
 
+    waveform_mode = "arbitrary"
     with col_opts:
-        _WAVEFORM_LABELS = {"square": "Square", "arbitrary": "Arbitrary"}
-        waveform_mode = st.radio(
-            "Waveform Mode",
-            ["square", "arbitrary"],
-            format_func=lambda x: _WAVEFORM_LABELS[x],
-            horizontal=True,
-            key="_sweep_waveform_mode",
-        )
         sweep_channel = st.radio(
             "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_sweep_ch",
         )
+        delay_exponent = st.number_input(
+            "Delay Exponent",
+            value=_ws.get("delay_exponent", 1.0),
+            min_value=-4.0, max_value=4.0, step=0.25, format="%.2f",
+            help="delay = a × pw^n + b (1=linear, -1=1/pw)",
+            key="_w_delay_exponent",
+        )
+    
+    # st.info("Pulse center is fixed at the middle of the period during sweep.")
 
     # Parse sweep-specific fields
     sweep_parse_errors = list(common_parse_errors)
@@ -714,7 +702,7 @@ with tab_sweep:
             waveform_mode=waveform_mode,
             settling_time=sweep_settling_time,
             trigger_delay_stop=_delay_stop_val if _delay_stop_val != int(trigger_delay) else None,
-            delay_interp=delay_interp,
+            delay_exponent=delay_exponent,
         )
 
     # Validation
@@ -726,7 +714,7 @@ with tab_sweep:
         st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_sweep))
     else:
         st.success("Parameters OK")
-        if sweep_config_built is not None and sweep_config_built.waveform_mode == "arbitrary":
+        if sweep_config_built is not None:
             widths = _generate_widths(
                 sweep_config_built.width_start,
                 sweep_config_built.width_stop,
@@ -747,23 +735,20 @@ with tab_sweep:
             instrument = PulseInstrument(config.visa_address)
             progress.progress(0, text="Setting up instrument...")
 
+            widths = _generate_widths(
+                config.width_start, config.width_stop, config.width_step,
+            )
+
+            def on_upload(i: int, total: int) -> None:
+                progress.progress(
+                    (i + 1) / total,
+                    text=f"Uploading segments... [{i + 1}/{total}]",
+                )
+
             for ch in channels:
-                if config.waveform_mode == "arbitrary":
-                    widths = _generate_widths(
-                        config.width_start, config.width_stop, config.width_step,
-                    )
-
-                    def on_upload(i: int, total: int) -> None:
-                        progress.progress(
-                            (i + 1) / total,
-                            text=f"Uploading segments... [{i + 1}/{total}]",
-                        )
-
-                    instrument.setup_arbitrary(
-                        config, widths, channel=ch, callback=on_upload,
-                    )
-                else:
-                    instrument.setup(config, config.width_start, channel=ch)
+                instrument.setup_arbitrary(
+                    config, widths, channel=ch, callback=on_upload,
+                )
 
             # Settling phase
             if config.settling_time > 0:
@@ -848,15 +833,8 @@ with tab_delay:
             key="_w_delay_settling_time",
         )
 
+    delay_waveform_mode = "arbitrary"
     with col_d3:
-        _DELAY_WAVEFORM_LABELS = {"square": "Square", "arbitrary": "Arbitrary"}
-        delay_waveform_mode = st.radio(
-            "Waveform Mode",
-            ["square", "arbitrary"],
-            format_func=lambda x: _DELAY_WAVEFORM_LABELS[x],
-            horizontal=True,
-            key="_delay_waveform_mode",
-        )
         delay_channel = st.radio(
             "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_delay_ch",
         )
@@ -909,7 +887,7 @@ with tab_delay:
         st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_delay))
     else:
         st.success("Parameters OK")
-        if delay_config_built is not None and delay_config_built.waveform_mode == "arbitrary":
+        if delay_config_built is not None:
             _show_arb_info(delay_config_built.frequency, [delay_config_built.pulse_width], resolution_n=resolution_n)
 
     # Run delay sweep
@@ -926,12 +904,9 @@ with tab_delay:
             progress.progress(0, text="Setting up instrument...")
 
             for ch in channels:
-                if config.waveform_mode == "arbitrary":
-                    instrument.setup_arbitrary(
-                        config, [config.pulse_width], channel=ch,
-                    )
-                else:
-                    instrument.setup(config, config.pulse_width, channel=ch)
+                instrument.setup_arbitrary(
+                    config, [config.pulse_width], channel=ch,
+                )
 
             # Settling phase
             if config.settling_time > 0:
@@ -999,12 +974,11 @@ def _build_toml_data() -> dict:
         },
         "simple_pulse": {
             "pulse_width": pulse_width_val if pulse_width_val is not None else 1e-8,
-            "waveform_mode": st.session_state.get("_pulse_waveform_mode", "square"),
         },
     }
 
     # Width Sweep section
-    ws_data: dict = {"waveform_mode": st.session_state.get("_sweep_waveform_mode", "square")}
+    ws_data: dict = {}
     for name in ("width_start", "width_stop", "width_step", "wait_time"):
         if name in sweep_parsed:
             ws_data[name] = sweep_parsed[name]
@@ -1012,13 +986,13 @@ def _build_toml_data() -> dict:
     _tds = int(st.session_state.get("_w_trigger_delay_stop", 0))
     if _tds != int(trigger_delay):
         ws_data["trigger_delay_stop"] = _tds
-    _di = st.session_state.get("_w_delay_interp", "linear")
-    if _di != "linear":
-        ws_data["delay_interp"] = _di
+    _de = float(st.session_state.get("_w_delay_exponent", 1.0))
+    if _de != 1.0:
+        ws_data["delay_exponent"] = _de
     data["width_sweep"] = ws_data
 
     # Delay Sweep section
-    ds_data: dict = {"waveform_mode": st.session_state.get("_delay_waveform_mode", "square")}
+    ds_data: dict = {}
     pw = delay_parsed.get("pulse_width")
     if pw is not None:
         ds_data["pulse_width"] = pw
@@ -1041,15 +1015,15 @@ if "frequency" in common_parsed:
     _res_n = int(resolution_n)
     # Pick the best available widths for calculation
     _arb_widths: list[float] | None = None
-    if sweep_config_built is not None and sweep_config_built.waveform_mode == "arbitrary":
+    if sweep_config_built is not None:
         _arb_widths = _generate_widths(
             sweep_config_built.width_start,
             sweep_config_built.width_stop,
             sweep_config_built.width_step,
         )
-    elif delay_config_built is not None and delay_config_built.waveform_mode == "arbitrary":
+    elif delay_config_built is not None:
         _arb_widths = [delay_config_built.pulse_width]
-    elif pulse_config is not None and pulse_config.waveform_mode == "arbitrary":
+    elif pulse_config is not None:
         _arb_widths = [pulse_config.pulse_width]
 
     _sr_over = False

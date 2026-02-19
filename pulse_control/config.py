@@ -82,6 +82,12 @@ class BaseConfig:
         elif "period" in flat:
             flat.pop("period")  # frequency takes precedence
         flat.setdefault("resolution_n", 1)
+        # Backward compat: delay_interp -> delay_exponent
+        if "delay_interp" in flat and "delay_exponent" not in flat:
+            _interp = flat.pop("delay_interp")
+            flat["delay_exponent"] = -1.0 if _interp == "inverse_width" else 1.0
+        elif "delay_interp" in flat:
+            flat.pop("delay_interp")
         return flat
 
 
@@ -90,7 +96,7 @@ class PulseConfig(BaseConfig):
     """Simple pulse output configuration for Agilent 81180A AWG."""
 
     pulse_width: float  # Pulse width [s]
-    waveform_mode: str = "square"  # "square" or "arbitrary"
+    waveform_mode: str = "arbitrary"
 
     @classmethod
     def from_toml(cls, path: str | Path) -> PulseConfig:
@@ -195,10 +201,10 @@ class SweepConfig(BaseConfig):
 
     # Sweep control
     wait_time: float    # Wait time between sweep steps [s]
-    waveform_mode: str = "square"  # "square" or "arbitrary"
+    waveform_mode: str = "arbitrary"
     settling_time: float = 0.0  # Initial settling time before sweep [s]
     trigger_delay_stop: int | None = None  # None = fixed delay; set to sweep delay
-    delay_interp: str = "linear"  # "linear" or "inverse_width"
+    delay_exponent: float = 1.0  # delay = a * pw^n + b (1=linear, -1=1/pw)
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
@@ -232,8 +238,8 @@ class SweepConfig(BaseConfig):
                 "settling_time": self.settling_time,
                 **({"trigger_delay_stop": self.trigger_delay_stop}
                    if self.trigger_delay_stop is not None else {}),
-                **({"delay_interp": self.delay_interp}
-                   if self.delay_interp != "linear" else {}),
+                **({"delay_exponent": self.delay_exponent}
+                   if self.delay_exponent != 1.0 else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -271,9 +277,9 @@ class SweepConfig(BaseConfig):
             if self.trigger_delay_stop % 8 != 0:
                 errors.append("trigger_delay_stop must be a multiple of 8")
 
-        if self.delay_interp not in ("linear", "inverse_width"):
+        if abs(self.delay_exponent) < 0.25 or abs(self.delay_exponent) > 4.0:
             errors.append(
-                f"delay_interp must be 'linear' or 'inverse_width', got '{self.delay_interp}'"
+                f"delay_exponent abs must be 0.25–4.0, got {self.delay_exponent}"
             )
 
         if self.waveform_mode not in ("square", "arbitrary"):
@@ -341,7 +347,7 @@ class DelaySweepConfig(BaseConfig):
 
     # Sweep control
     wait_time: float     # Wait time between sweep steps [s]
-    waveform_mode: str = "square"  # "square" or "arbitrary"
+    waveform_mode: str = "arbitrary"
     settling_time: float = 0.0  # Initial settling time before sweep [s]
 
     @classmethod
@@ -481,6 +487,13 @@ def load_unified_toml(path: str | Path) -> dict:
         common["frequency"] = 1.0 / common.pop("period")
     elif "period" in common:
         common.pop("period")
+    # Backward compat: delay_interp -> delay_exponent
+    ws = data.get("width_sweep", {})
+    if "delay_interp" in ws and "delay_exponent" not in ws:
+        _interp = ws.pop("delay_interp")
+        ws["delay_exponent"] = -1.0 if _interp == "inverse_width" else 1.0
+    elif "delay_interp" in ws:
+        ws.pop("delay_interp")
     return data
 
 

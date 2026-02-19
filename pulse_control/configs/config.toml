@@ -15,7 +15,6 @@ resolution_n = 1
 
 [simple_pulse]
 pulse_width = 1e-8
-waveform_mode = "square"
 
 [width_sweep]
 width_start = 1e-8
@@ -23,7 +22,6 @@ width_stop = 5e-8
 width_step = 5e-9
 wait_time = 1.0
 settling_time = 0.0
-waveform_mode = "square"
 
 [delay_sweep]
 pulse_width = 1e-8
@@ -32,4 +30,3 @@ delay_stop = 80
 delay_step = 8
 wait_time = 1.0
 settling_time = 0.0
-waveform_mode = "square"

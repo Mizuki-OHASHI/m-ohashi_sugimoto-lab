@@ -37,7 +37,6 @@ def main_pulse(config_path: str) -> None:
         trigger_delay=int(common.get("trigger_delay", 0)),
         resolution_n=int(common.get("resolution_n", 1)),
         pulse_width=sp.get("pulse_width", 1e-8),
-        waveform_mode=sp.get("waveform_mode", "square"),
     )
 
     errors = config.validate()
@@ -94,10 +93,9 @@ def main_sweep(config_path: str) -> None:
         width_stop=ws.get("width_stop", 5e-8),
         width_step=ws.get("width_step", 5e-9),
         wait_time=ws.get("wait_time", 1.0),
-        waveform_mode=ws.get("waveform_mode", "square"),
         settling_time=ws.get("settling_time", 0.0),
         trigger_delay_stop=ws.get("trigger_delay_stop"),
-        delay_interp=ws.get("delay_interp", "linear"),
+        delay_exponent=ws.get("delay_exponent", 1.0),
     )
 
     errors = config.validate()
@@ -117,7 +115,7 @@ def main_sweep(config_path: str) -> None:
     logger.info("  Frequency=%s Hz (period=%s s)", config.frequency, config.period)
     logger.info("  Trigger delay=%s points", config.trigger_delay)
     logger.info("  Wait time=%s s", config.wait_time)
-    logger.info("  Waveform mode=%s", config.waveform_mode)
+    logger.info("  Waveform mode=arbitrary")
 
     logger.info("Checking connection...")
     try:
@@ -130,11 +128,8 @@ def main_sweep(config_path: str) -> None:
     logger.info("Starting sweep...")
     instrument = PulseInstrument(config.visa_address)
     try:
-        if config.waveform_mode == "arbitrary":
-            widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
-            instrument.setup_arbitrary(config, widths)
-        else:
-            instrument.setup(config, config.width_start)
+        widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
+        instrument.setup_arbitrary(config, widths)
         run_sweep(config, instrument)
         instrument.teardown()
     finally:

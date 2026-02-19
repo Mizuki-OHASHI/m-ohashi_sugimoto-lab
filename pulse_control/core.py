@@ -324,25 +324,23 @@ def run_sweep(
     delay_stop = config.trigger_delay_stop
     sweep_delay = delay_stop is not None and delay_stop != delay_start
 
-    # Pre-compute coefficients for inverse_width interpolation:
-    #   delay(pw) = a / pw + b
+    # Pre-compute coefficients for delay interpolation:
+    #   delay(pw) = a * pw^n + b  (n = delay_exponent)
     #   delay(width_start) = delay_start, delay(width_stop) = delay_stop
-    _inv_a = _inv_b = 0.0
-    if sweep_delay and config.delay_interp == "inverse_width":
-        inv_start = 1.0 / config.width_start
-        inv_stop = 1.0 / config.width_stop
-        _inv_a = (delay_start - delay_stop) / (inv_start - inv_stop)
-        _inv_b = delay_start - _inv_a * inv_start
+    _coeff_a = _coeff_b = 0.0
+    _exp = config.delay_exponent
+    if sweep_delay:
+        f_start = config.width_start ** _exp
+        f_stop = config.width_stop ** _exp
+        if f_start != f_stop:
+            _coeff_a = (delay_start - delay_stop) / (f_start - f_stop)
+            _coeff_b = delay_start - _coeff_a * f_start
 
     def _apply_delay(i: int) -> None:
         """Interpolate and apply trigger delay for step *i*."""
         if not sweep_delay:
             return
-        if config.delay_interp == "inverse_width":
-            raw = _inv_a / widths[i] + _inv_b
-        else:
-            frac = i / max(total - 1, 1)
-            raw = delay_start + (delay_stop - delay_start) * frac
+        raw = _coeff_a * widths[i] ** _exp + _coeff_b
         delay = round(raw / 8) * 8
         for ch in channels:
             instrument.set_trigger_delay(delay, channel=ch)
