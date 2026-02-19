@@ -315,12 +315,25 @@ def run_sweep(
     delay_stop = config.trigger_delay_stop
     sweep_delay = delay_stop is not None and delay_stop != delay_start
 
+    # Pre-compute coefficients for inverse_width interpolation:
+    #   delay(pw) = a / pw + b
+    #   delay(width_start) = delay_start, delay(width_stop) = delay_stop
+    _inv_a = _inv_b = 0.0
+    if sweep_delay and config.delay_interp == "inverse_width":
+        inv_start = 1.0 / config.width_start
+        inv_stop = 1.0 / config.width_stop
+        _inv_a = (delay_start - delay_stop) / (inv_start - inv_stop)
+        _inv_b = delay_start - _inv_a * inv_start
+
     def _apply_delay(i: int) -> None:
         """Interpolate and apply trigger delay for step *i*."""
         if not sweep_delay:
             return
-        frac = i / max(total - 1, 1)
-        raw = delay_start + (delay_stop - delay_start) * frac
+        if config.delay_interp == "inverse_width":
+            raw = _inv_a / widths[i] + _inv_b
+        else:
+            frac = i / max(total - 1, 1)
+            raw = delay_start + (delay_stop - delay_start) * frac
         delay = round(raw / 8) * 8
         for ch in channels:
             instrument.set_trigger_delay(delay, channel=ch)

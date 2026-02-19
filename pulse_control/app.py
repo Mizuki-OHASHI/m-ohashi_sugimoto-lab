@@ -154,6 +154,7 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_trigger_delay_stop = (
         td_stop if td_stop is not None else common.get("trigger_delay", 0)
     )
+    st.session_state._w_delay_interp = ws.get("delay_interp", "linear")
 
     # Delay Sweep
     st.session_state._w_delay_pulse_width = format_si(ds.get("pulse_width", 1e-8))
@@ -606,6 +607,14 @@ with tab_sweep:
                  "Set equal to Trigger Delay for fixed delay.",
             key="_w_trigger_delay_stop",
         )
+        _INTERP_LABELS = {"linear": "Linear", "inverse_width": "1 / pulse width"}
+        delay_interp = st.radio(
+            "Delay Interpolation",
+            ["linear", "inverse_width"],
+            format_func=lambda x: _INTERP_LABELS[x],
+            horizontal=True,
+            key="_w_delay_interp",
+        )
         st.info("Pulse center is fixed at the middle of the period during sweep.")
 
     with col_opts:
@@ -654,6 +663,7 @@ with tab_sweep:
             waveform_mode=waveform_mode,
             settling_time=sweep_settling_time,
             trigger_delay_stop=_delay_stop_val if _delay_stop_val != int(trigger_delay) else None,
+            delay_interp=delay_interp,
         )
 
     # Validation
@@ -940,6 +950,9 @@ def _build_toml_data() -> dict:
     _tds = int(st.session_state.get("_w_trigger_delay_stop", 0))
     if _tds != int(trigger_delay):
         ws_data["trigger_delay_stop"] = _tds
+    _di = st.session_state.get("_w_delay_interp", "linear")
+    if _di != "linear":
+        ws_data["delay_interp"] = _di
     data["width_sweep"] = ws_data
 
     # Delay Sweep section

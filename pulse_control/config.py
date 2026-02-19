@@ -195,7 +195,8 @@ class SweepConfig(BaseConfig):
     wait_time: float    # Wait time between sweep steps [s]
     waveform_mode: str = "square"  # "square" or "arbitrary"
     settling_time: float = 0.0  # Initial settling time before sweep [s]
-    trigger_delay_stop: int | None = None  # None = fixed delay; set to sweep delay linearly
+    trigger_delay_stop: int | None = None  # None = fixed delay; set to sweep delay
+    delay_interp: str = "linear"  # "linear" or "inverse_width"
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
@@ -229,6 +230,8 @@ class SweepConfig(BaseConfig):
                 "settling_time": self.settling_time,
                 **({"trigger_delay_stop": self.trigger_delay_stop}
                    if self.trigger_delay_stop is not None else {}),
+                **({"delay_interp": self.delay_interp}
+                   if self.delay_interp != "linear" else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -265,6 +268,11 @@ class SweepConfig(BaseConfig):
                 errors.append("trigger_delay_stop must be >= 0")
             if self.trigger_delay_stop % 8 != 0:
                 errors.append("trigger_delay_stop must be a multiple of 8")
+
+        if self.delay_interp not in ("linear", "inverse_width"):
+            errors.append(
+                f"delay_interp must be 'linear' or 'inverse_width', got '{self.delay_interp}'"
+            )
 
         if self.waveform_mode not in ("square", "arbitrary"):
             errors.append(

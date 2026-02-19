@@ -1,0 +1,36 @@
+[save]
+save_dir = "configs"
+filename_format = "pulse_control_20260216_"
+
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"
+
+[common]
+v_on = 0.13
+v_off = 2.13
+frequency = 5000000.0
+period = 2e-7
+trigger_delay = 1368
+
+[simple_pulse]
+pulse_width = 5e-9
+waveform_mode = "arbitrary"
+
+[width_sweep]
+waveform_mode = "arbitrary"
+width_start = 1e-8
+width_stop = 1.4e-7
+width_step = 2.5e-9
+wait_time = 1.2
+settling_time = 2.0
+trigger_delay_stop = 1480
+delay_interp = "inverse_width"
+
+[delay_sweep]
+waveform_mode = "arbitrary"
+pulse_width = 1e-8
+wait_time = 0.04
+delay_start = 0
+delay_stop = 6400
+delay_step = 16
+settling_time = 2.0

@@ -95,6 +95,7 @@ def main_sweep(config_path: str) -> None:
         waveform_mode=ws.get("waveform_mode", "square"),
         settling_time=ws.get("settling_time", 0.0),
         trigger_delay_stop=ws.get("trigger_delay_stop"),
+        delay_interp=ws.get("delay_interp", "linear"),
     )
 
     errors = config.validate()
