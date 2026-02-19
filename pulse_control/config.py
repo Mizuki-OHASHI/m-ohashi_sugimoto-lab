@@ -31,6 +31,7 @@ class BaseConfig:
     # AWG parameters
     frequency: float    # Repetition frequency [Hz] (width controlled via duty cycle)
     trigger_delay: int  # Trigger delay [sample points] (multiple of 8)
+    resolution_n: int  # Delay resolution multiplier (points_per_period × n)
 
     @property
     def period(self) -> float:
@@ -80,6 +81,7 @@ class BaseConfig:
             flat["frequency"] = 1.0 / flat.pop("period")
         elif "period" in flat:
             flat.pop("period")  # frequency takes precedence
+        flat.setdefault("resolution_n", 1)
         return flat
 
 

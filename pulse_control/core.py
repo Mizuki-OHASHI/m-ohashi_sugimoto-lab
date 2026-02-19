@@ -15,7 +15,9 @@ from config import BaseConfig, DelaySweepConfig, SweepConfig
 logger = getLogger(__name__)
 
 
-def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]:
+def _calc_arb_params(
+    frequency: float, widths: list[float], *, resolution_n: int = 1,
+) -> tuple[float, int]:
     """Compute optimal sample rate and points-per-period for arbitrary mode.
 
     Algorithm:
@@ -23,7 +25,8 @@ def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]
     2. Divide GCD by K to get time_per_point.
     3. Increase K until points_per_period >= 320 and is a multiple of 32.
        (81180A: min segment = 320 points, increment = 32 points)
-    4. Verify sample_rate = 1/time_per_point is within 10 MSa/s – 4.2 GSa/s.
+    4. Multiply by resolution_n for finer delay resolution.
+    5. Verify sample_rate = 1/time_per_point is within 10 MSa/s – 4.2 GSa/s.
     """
     period = 1.0 / frequency
     # Convert to picoseconds (integer) for exact GCD
@@ -48,6 +51,10 @@ def _calc_arb_params(frequency: float, widths: list[float]) -> tuple[float, int]
     while pts % 32 != 0:
         k += 1
         pts = base_points * k
+
+    # Apply resolution multiplier (base × k is already a multiple of 32,
+    # so base × k × n is also a multiple of 32)
+    pts *= resolution_n
 
     points_per_period = pts
     time_per_point = period / points_per_period
@@ -203,7 +210,9 @@ class PulseInstrument:
         # Clear existing segments to avoid conflicts
         w(":TRAC:DEL:ALL")
 
-        sample_rate, points_per_period = _calc_arb_params(config.frequency, widths)
+        sample_rate, points_per_period = _calc_arb_params(
+            config.frequency, widths, resolution_n=config.resolution_n,
+        )
         logger.info(
             "ARB params: sample_rate=%.3e Sa/s, points_per_period=%d",
             sample_rate, points_per_period,

@@ -35,6 +35,7 @@ def main_pulse(config_path: str) -> None:
         v_off=common.get("v_off", -1.0),
         frequency=common.get("frequency", 10_000_000.0),
         trigger_delay=int(common.get("trigger_delay", 0)),
+        resolution_n=int(common.get("resolution_n", 1)),
         pulse_width=sp.get("pulse_width", 1e-8),
         waveform_mode=sp.get("waveform_mode", "square"),
     )
@@ -88,6 +89,7 @@ def main_sweep(config_path: str) -> None:
         v_off=common.get("v_off", -1.0),
         frequency=common.get("frequency", 10_000_000.0),
         trigger_delay=int(common.get("trigger_delay", 0)),
+        resolution_n=int(common.get("resolution_n", 1)),
         width_start=ws.get("width_start", 1e-8),
         width_stop=ws.get("width_stop", 5e-8),
         width_step=ws.get("width_step", 5e-9),

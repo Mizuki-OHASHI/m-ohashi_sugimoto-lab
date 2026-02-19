@@ -11,6 +11,7 @@ v_off = -1.0
 frequency = 10000000.0
 period = 1e-7
 trigger_delay = 0
+resolution_n = 1
 
 [simple_pulse]
 pulse_width = 1e-8

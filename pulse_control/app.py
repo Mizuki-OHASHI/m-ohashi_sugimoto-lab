@@ -23,7 +23,7 @@ from config import (
     next_save_path,
     save_unified_toml,
 )
-from core import PulseInstrument, _generate_widths, run_delay_sweep, run_sweep
+from core import PulseInstrument, _calc_arb_params, _generate_widths, run_delay_sweep, run_sweep
 from log_setup import setup_logging
 
 DEFAULT_CONFIG = Path("configs/config.toml")
@@ -72,6 +72,37 @@ def format_si(value: float) -> str:
 
 
 _CHANNEL_MAP = {"CH1": [1], "CH2": [2], "Both": [1, 2]}
+
+MAX_SAMPLE_RATE = 4.2e9  # 81180A maximum sample clock
+
+
+def _show_arb_info(frequency: float, widths: list[float], *, resolution_n: int = 1) -> None:
+    """Show arbitrary waveform parameters in a collapsed expander."""
+    try:
+        sample_rate, pts = _calc_arb_params(frequency, widths, resolution_n=resolution_n)
+    except Exception as exc:
+        st.warning(f"ARB calc error: {exc}")
+        return
+    period = 1.0 / frequency
+    tpp = period / pts
+    delay_step_time = 8 * tpp
+    total_memory = len(widths) * pts
+
+    if sample_rate > MAX_SAMPLE_RATE:
+        st.warning(
+            f"Sample rate {sample_rate:.3e} Sa/s exceeds 4.2 GSa/s limit. "
+            "Increase period or use a coarser width step."
+        )
+
+    with st.expander("Arbitrary Waveform Details"):
+        st.json({
+            "segments": len(widths),
+            "points_per_period": pts,
+            "sample_rate": f"{sample_rate:.3e} Sa/s",
+            "time_per_point": f"{format_si(tpp)}s",
+            "delay_resolution (×8)": f"{format_si(delay_step_time)}s",
+            "total_memory": f"{total_memory:,} words",
+        })
 
 
 # ================================================================== #
@@ -138,6 +169,7 @@ def _load_config_to_widgets(data: dict) -> None:
     if freq > 0:
         st.session_state._w_period = format_si(1.0 / freq)
     st.session_state._w_trigger_delay = common.get("trigger_delay", 0)
+    st.session_state._w_resolution_n = common.get("resolution_n", 1)
 
     # Simple Pulse
     st.session_state._w_pulse_width = format_si(sp.get("pulse_width", 1e-8))
@@ -164,6 +196,11 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_delay_wait_time = format_si(ds.get("wait_time", 1.0))
     st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
     st.session_state._delay_waveform_mode = ds.get("waveform_mode", "square")
+
+
+# Process pending import BEFORE any widgets are instantiated
+if "_pending_import" in st.session_state:
+    _load_config_to_widgets(st.session_state.pop("_pending_import"))
 
 
 # ================================================================== #
@@ -315,7 +352,7 @@ with st.sidebar:
                     tmp.write(uploaded.read())
                     tmp.flush()
                     try:
-                        _load_config_to_widgets(load_unified_toml(tmp.name))
+                        st.session_state._pending_import = load_unified_toml(tmp.name)
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Import failed: {exc}")
@@ -358,6 +395,16 @@ with col_timing:
         value=_common.get("trigger_delay", 0), min_value=0, step=8,
         key="_w_trigger_delay",
     )
+    col_res_n, col_res_val = st.columns(2)
+    with col_res_n:
+        resolution_n = st.number_input(
+            "Delay Resolution (×n)",
+            value=_common.get("resolution_n", 1), min_value=1, step=1,
+            help="Multiplier for points_per_period. Higher = finer delay resolution.",
+            key="_w_resolution_n",
+        )
+    with col_res_val:
+        _delay_res_placeholder = st.empty()
 
 # Parse common SI fields
 common_parse_errors: list[str] = []
@@ -418,6 +465,7 @@ with tab_pulse:
             v_off=v_off,
             frequency=common_parsed["frequency"],
             trigger_delay=int(trigger_delay),
+            resolution_n=int(resolution_n),
             pulse_width=pulse_width_val,
             waveform_mode=pulse_waveform_mode,
         )
@@ -431,6 +479,8 @@ with tab_pulse:
         st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_pulse))
     else:
         st.success("Parameters OK")
+        if pulse_config is not None and pulse_config.waveform_mode == "arbitrary":
+            _show_arb_info(pulse_config.frequency, [pulse_config.pulse_width], resolution_n=resolution_n)
 
     # Per-channel Start/Stop buttons
     ch1_running = st.session_state.get("ch1_running", False)
@@ -659,6 +709,7 @@ with tab_sweep:
             width_step=sweep_parsed["width_step"],
             frequency=sweep_parsed["frequency"],
             trigger_delay=int(trigger_delay),
+            resolution_n=int(resolution_n),
             wait_time=sweep_parsed["wait_time"],
             waveform_mode=waveform_mode,
             settling_time=sweep_settling_time,
@@ -675,6 +726,13 @@ with tab_sweep:
         st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_sweep))
     else:
         st.success("Parameters OK")
+        if sweep_config_built is not None and sweep_config_built.waveform_mode == "arbitrary":
+            widths = _generate_widths(
+                sweep_config_built.width_start,
+                sweep_config_built.width_stop,
+                sweep_config_built.width_step,
+            )
+            _show_arb_info(sweep_config_built.frequency, widths, resolution_n=resolution_n)
 
     # Run sweep
     if st.button("Start Sweep", disabled=bool(errors_sweep) or not visa_address, type="primary",
@@ -832,6 +890,7 @@ with tab_delay:
             v_off=v_off,
             frequency=delay_parsed["frequency"],
             trigger_delay=int(delay_start_val),
+            resolution_n=int(resolution_n),
             pulse_width=delay_parsed["pulse_width"],
             delay_start=int(delay_start_val),
             delay_stop=int(delay_stop_val),
@@ -850,6 +909,8 @@ with tab_delay:
         st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_delay))
     else:
         st.success("Parameters OK")
+        if delay_config_built is not None and delay_config_built.waveform_mode == "arbitrary":
+            _show_arb_info(delay_config_built.frequency, [delay_config_built.pulse_width], resolution_n=resolution_n)
 
     # Run delay sweep
     if st.button("Start Delay Sweep", disabled=bool(errors_delay) or not visa_address,
@@ -934,6 +995,7 @@ def _build_toml_data() -> dict:
             "frequency": freq,
             "period": 1.0 / freq if freq > 0 else 0.0,
             "trigger_delay": int(trigger_delay),
+            "resolution_n": int(resolution_n),
         },
         "simple_pulse": {
             "pulse_width": pulse_width_val if pulse_width_val is not None else 1e-8,
@@ -970,6 +1032,40 @@ def _build_toml_data() -> dict:
     data["delay_sweep"] = ds_data
 
     return data
+
+
+# Delay resolution display — fill placeholder after all tabs
+_delay_res_text = ""
+if "frequency" in common_parsed:
+    _freq = common_parsed["frequency"]
+    _res_n = int(resolution_n)
+    # Pick the best available widths for calculation
+    _arb_widths: list[float] | None = None
+    if sweep_config_built is not None and sweep_config_built.waveform_mode == "arbitrary":
+        _arb_widths = _generate_widths(
+            sweep_config_built.width_start,
+            sweep_config_built.width_stop,
+            sweep_config_built.width_step,
+        )
+    elif delay_config_built is not None and delay_config_built.waveform_mode == "arbitrary":
+        _arb_widths = [delay_config_built.pulse_width]
+    elif pulse_config is not None and pulse_config.waveform_mode == "arbitrary":
+        _arb_widths = [pulse_config.pulse_width]
+
+    _sr_over = False
+    if _arb_widths is not None:
+        try:
+            _sr, _pts = _calc_arb_params(_freq, _arb_widths, resolution_n=_res_n)
+            _tpp = 1.0 / _freq / _pts
+            _delay_res_text = f"{format_si(8 * _tpp)}s"
+            _sr_over = _sr > MAX_SAMPLE_RATE
+        except Exception:
+            _delay_res_text = "error"
+
+with _delay_res_placeholder.container():
+    st.text_input("Delay Resolution", value=_delay_res_text or "N/A", disabled=True)
+    if _sr_over:
+        st.warning("Sample rate exceeds 4.2 GSa/s. Reduce ×n.")
 
 
 # Save button — rendered in sidebar placeholder (after subheader, before expander)
