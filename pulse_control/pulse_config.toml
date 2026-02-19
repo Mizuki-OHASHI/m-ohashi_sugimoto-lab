@@ -4,15 +4,9 @@ visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"  # Agilent 81180A VISA addr
 [pulse]
 v_on = 0.0    # Voltage during pulse ON [V]
 v_off = -1.0  # Voltage during pulse OFF (base) [V]
-
-[sweep]
-width_start = 1e-8   # Pulse width start [s] (10 ns)
-width_stop = 5e-8    # Pulse width stop [s] (50 ns)
-width_step = 5e-9    # Pulse width step [s] (5 ns)
-wait_time = 1.0      # Wait time between sweep steps [s]
+pulse_width = 1e-8  # Pulse width [s] (10 ns)
 
 [awg]
 frequency = 10000000.0  # Repetition frequency [Hz] (10 MHz)
 period = 1e-7           # Period [s] (= 1/frequency)
 trigger_delay = 0       # Trigger delay [sample points] (multiple of 8)
-waveform_mode = "square"  # "square" or "arbitrary" (glitch-free)

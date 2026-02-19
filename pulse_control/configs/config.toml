@@ -1,0 +1,32 @@
+[save]
+save_dir = "configs"
+filename_format = "pulse_control_20260216_"
+
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"
+
+[common]
+v_on = 0.0
+v_off = -1.0
+frequency = 10000000.0
+period = 1e-7
+trigger_delay = 0
+resolution_n = 1
+
+[simple_pulse]
+pulse_width = 1e-8
+
+[width_sweep]
+width_start = 1e-8
+width_stop = 5e-8
+width_step = 5e-9
+wait_time = 1.0
+settling_time = 0.0
+
+[delay_sweep]
+pulse_width = 1e-8
+delay_start = 0
+delay_stop = 80
+delay_step = 8
+wait_time = 1.0
+settling_time = 0.0
