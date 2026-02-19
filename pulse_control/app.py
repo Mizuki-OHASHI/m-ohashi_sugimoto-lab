@@ -14,11 +14,19 @@ from pathlib import Path
 
 import streamlit as st
 
-from config import DEFAULT_VISA_ADDRESS, DelaySweepConfig, PulseConfig, SweepConfig
+from config import (
+    DEFAULT_VISA_ADDRESS,
+    DelaySweepConfig,
+    PulseConfig,
+    SweepConfig,
+    load_unified_toml,
+    next_save_path,
+    save_unified_toml,
+)
 from core import PulseInstrument, _generate_widths, run_delay_sweep, run_sweep
 from log_setup import setup_logging
 
-DEFAULT_CONFIG = Path("sweep_config.toml")
+DEFAULT_CONFIG = Path("configs/config.toml")
 
 setup_logging()
 logger = getLogger(__name__)
@@ -67,12 +75,18 @@ _CHANNEL_MAP = {"CH1": [1], "CH2": [2], "Both": [1, 2]}
 
 
 # ================================================================== #
-#  Session initialisation
+#  Session initialisation (unified TOML)
 # ================================================================== #
-if "sweep_config" not in st.session_state:
-    st.session_state.sweep_config = SweepConfig.from_toml(DEFAULT_CONFIG)
+if "unified_config" not in st.session_state:
+    st.session_state.unified_config = load_unified_toml(DEFAULT_CONFIG)
 
-sweep_cfg: SweepConfig = st.session_state.sweep_config
+ucfg: dict = st.session_state.unified_config
+_save = ucfg.get("save", {})
+_conn = ucfg.get("connection", {})
+_common = ucfg.get("common", {})
+_sp = ucfg.get("simple_pulse", {})
+_ws = ucfg.get("width_sweep", {})
+_ds = ucfg.get("delay_sweep", {})
 
 
 # ================================================================== #
@@ -98,23 +112,57 @@ def _on_period_change() -> None:
         pass
 
 
-def _load_config_to_widgets(new_cfg: SweepConfig) -> None:
-    """Push SweepConfig values into widget session state."""
-    st.session_state.sweep_config = new_cfg
-    # Common fields
-    st.session_state._w_v_on = new_cfg.v_on
-    st.session_state._w_v_off = new_cfg.v_off
-    st.session_state._w_freq = format_si(new_cfg.frequency)
-    if new_cfg.frequency > 0:
-        st.session_state._w_period = format_si(1.0 / new_cfg.frequency)
-    st.session_state._w_trigger_delay = new_cfg.trigger_delay
-    # Sweep-specific fields
-    st.session_state._w_width_start = format_si(new_cfg.width_start)
-    st.session_state._w_width_stop = format_si(new_cfg.width_stop)
-    st.session_state._w_width_step = format_si(new_cfg.width_step)
-    st.session_state._w_wait_time = format_si(new_cfg.wait_time)
-    # Pulse width defaults to width_start
-    st.session_state._w_pulse_width = format_si(new_cfg.width_start)
+def _load_config_to_widgets(data: dict) -> None:
+    """Push unified TOML data into widget session state."""
+    st.session_state.unified_config = data
+
+    save = data.get("save", {})
+    conn = data.get("connection", {})
+    common = data.get("common", {})
+    sp = data.get("simple_pulse", {})
+    ws = data.get("width_sweep", {})
+    ds = data.get("delay_sweep", {})
+
+    # Save settings
+    st.session_state._w_save_dir = save.get("save_dir", "configs")
+    st.session_state._w_filename_format = save.get("filename_format", "")
+
+    # Connection
+    st.session_state._w_visa_address = conn.get("visa_address", DEFAULT_VISA_ADDRESS)
+
+    # Common
+    st.session_state._w_v_on = common.get("v_on", 0.0)
+    st.session_state._w_v_off = common.get("v_off", -1.0)
+    freq = common.get("frequency", 10_000_000.0)
+    st.session_state._w_freq = format_si(freq)
+    if freq > 0:
+        st.session_state._w_period = format_si(1.0 / freq)
+    st.session_state._w_trigger_delay = common.get("trigger_delay", 0)
+
+    # Simple Pulse
+    st.session_state._w_pulse_width = format_si(sp.get("pulse_width", 1e-8))
+    st.session_state._pulse_waveform_mode = sp.get("waveform_mode", "square")
+
+    # Width Sweep
+    st.session_state._w_width_start = format_si(ws.get("width_start", 1e-8))
+    st.session_state._w_width_stop = format_si(ws.get("width_stop", 5e-8))
+    st.session_state._w_width_step = format_si(ws.get("width_step", 5e-9))
+    st.session_state._w_wait_time = format_si(ws.get("wait_time", 1.0))
+    st.session_state._w_settling_time = ws.get("settling_time", 0.0)
+    st.session_state._sweep_waveform_mode = ws.get("waveform_mode", "square")
+    td_stop = ws.get("trigger_delay_stop")
+    st.session_state._w_trigger_delay_stop = (
+        td_stop if td_stop is not None else common.get("trigger_delay", 0)
+    )
+
+    # Delay Sweep
+    st.session_state._w_delay_pulse_width = format_si(ds.get("pulse_width", 1e-8))
+    st.session_state._w_delay_start = ds.get("delay_start", 0)
+    st.session_state._w_delay_stop = ds.get("delay_stop", 80)
+    st.session_state._w_delay_step = ds.get("delay_step", 8)
+    st.session_state._w_delay_wait_time = format_si(ds.get("wait_time", 1.0))
+    st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
+    st.session_state._delay_waveform_mode = ds.get("waveform_mode", "square")
 
 
 # ================================================================== #
@@ -191,21 +239,23 @@ def _pulse_stop(visa_addr: str, channel: int) -> None:
 
 
 # ================================================================== #
-#  Sidebar: title + connection + DC 0V + TOML import
+#  Sidebar: title + connection + DC 0V + TOML import/export
 # ================================================================== #
 with st.sidebar:
     st.header("Pulse Control")
     st.caption("Agilent 81180A AWG")
 
-    # st.divider()
-    # st.markdown("**Connection**")
     st.subheader("Connection")
-    visa_address = st.text_input("VISA Address", value=sweep_cfg.visa_address)
+    visa_address = st.text_input(
+        "VISA Address",
+        value=_conn.get("visa_address", DEFAULT_VISA_ADDRESS),
+        key="_w_visa_address",
+    )
 
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
         if st.button("Reset", use_container_width=True):
-            sweep_cfg.visa_address = DEFAULT_VISA_ADDRESS
+            st.session_state._w_visa_address = DEFAULT_VISA_ADDRESS
             st.rerun()
     with btn_col2:
         check_conn = st.button("Check", use_container_width=True)
@@ -224,7 +274,6 @@ with st.sidebar:
                 logger.error("Connection check failed: %s", exc)
 
     # DC 0V button (always visible)
-    # st.divider()
     if st.button("DC 0V", use_container_width=True, help="Set output to DC 0V (safe state)", type="primary"):
         if st.session_state.get("live_connection"):
             _close_live_connection()
@@ -242,23 +291,35 @@ with st.sidebar:
                 st.error(f"Failed: {exc}")
                 logger.error("DC 0V failed: %s", exc)
 
-    # st.divider()
-    # st.markdown("**TOML Config**")
     st.subheader("TOML Config")
 
-    uploaded = st.file_uploader("Import TOML", type=["toml"])
-    if uploaded is not None:
-        upload_id = f"{uploaded.name}_{uploaded.size}"
-        if st.session_state.get("_last_upload_id") != upload_id:
-            st.session_state._last_upload_id = upload_id
-            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as tmp:
-                tmp.write(uploaded.read())
-                tmp.flush()
-                try:
-                    _load_config_to_widgets(SweepConfig.from_toml(tmp.name))
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Import failed: {exc}")
+    with st.expander("Settings / Import"):
+        st.text_input(
+            "Save Directory",
+            value=_save.get("save_dir", "configs"),
+            key="_w_save_dir",
+        )
+        st.text_input(
+            "Filename Format",
+            value=_save.get("filename_format", "pulse_control_"),
+            key="_w_filename_format",
+        )
+
+        uploaded = st.file_uploader("Import TOML", type=["toml"])
+        if uploaded is not None:
+            upload_id = f"{uploaded.name}_{uploaded.size}"
+            if st.session_state.get("_last_upload_id") != upload_id:
+                st.session_state._last_upload_id = upload_id
+                with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as tmp:
+                    tmp.write(uploaded.read())
+                    tmp.flush()
+                    try:
+                        _load_config_to_widgets(load_unified_toml(tmp.name))
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Import failed: {exc}")
+
+    _save_btn_placeholder = st.empty()
 
 
 # ================================================================== #
@@ -267,28 +328,33 @@ with st.sidebar:
 col_volt, col_timing = st.columns(2)
 
 with col_volt:
-    v_on = st.number_input("V_on [V]", value=sweep_cfg.v_on, format="%.4f", key="_w_v_on")
-    v_off = st.number_input("V_off [V]", value=sweep_cfg.v_off, format="%.4f", key="_w_v_off")
+    v_on = st.number_input(
+        "V_on [V]", value=_common.get("v_on", 0.0), format="%.4f", key="_w_v_on",
+    )
+    v_off = st.number_input(
+        "V_off [V]", value=_common.get("v_off", -1.0), format="%.4f", key="_w_v_off",
+    )
 
 with col_timing:
     freq_col, period_col = st.columns(2)
     with freq_col:
         st.text_input(
             "Frequency [Hz]",
-            value=format_si(sweep_cfg.frequency),
+            value=format_si(_common.get("frequency", 10_000_000.0)),
             key="_w_freq",
             on_change=_on_freq_change,
         )
     with period_col:
+        _freq_default = _common.get("frequency", 10_000_000.0)
         st.text_input(
             "Period [s]",
-            value=format_si(1.0 / sweep_cfg.frequency),
+            value=format_si(1.0 / _freq_default) if _freq_default > 0 else "0",
             key="_w_period",
             on_change=_on_period_change,
         )
     trigger_delay = st.number_input(
         "Trigger Delay [points] (multiple of 8)",
-        value=sweep_cfg.trigger_delay, min_value=0, step=8,
+        value=_common.get("trigger_delay", 0), min_value=0, step=8,
         key="_w_trigger_delay",
     )
 
@@ -320,7 +386,7 @@ with tab_pulse:
     with _p_col1:
         st.text_input(
             "Pulse Width [s]",
-            value=format_si(sweep_cfg.width_start),
+            value=format_si(_sp.get("pulse_width", 1e-8)),
             key="_w_pulse_width",
         )
     with _p_col2:
@@ -507,35 +573,35 @@ with tab_sweep:
     with col_range:
         st.text_input(
             "Width Start [s]",
-            value=format_si(sweep_cfg.width_start),
+            value=format_si(_ws.get("width_start", 1e-8)),
             key="_w_width_start",
         )
         st.text_input(
             "Width Stop [s]",
-            value=format_si(sweep_cfg.width_stop),
+            value=format_si(_ws.get("width_stop", 5e-8)),
             key="_w_width_stop",
         )
         st.text_input(
             "Width Step [s]",
-            value=format_si(sweep_cfg.width_step),
+            value=format_si(_ws.get("width_step", 5e-9)),
             key="_w_width_step",
         )
 
     with col_timing:
         st.text_input(
             "Wait Time [s]",
-            value=format_si(sweep_cfg.wait_time),
+            value=format_si(_ws.get("wait_time", 1.0)),
             key="_w_wait_time",
         )
         sweep_settling_time = st.number_input(
             "Settling Time [s]",
-            value=0.0, min_value=0.0, step=1.0, format="%.1f",
+            value=_ws.get("settling_time", 0.0), min_value=0.0, step=1.0, format="%.1f",
             help="Wait time before sweep starts (for DUT to reach steady state)",
             key="_w_settling_time",
         )
         sweep_trigger_delay_stop = st.number_input(
             "Trigger Delay Stop [points] (×8)",
-            value=int(trigger_delay), min_value=0, step=8,
+            value=_common.get("trigger_delay", 0), min_value=0, step=8,
             help="End value for trigger delay sweep. "
                  "Set equal to Trigger Delay for fixed delay.",
             key="_w_trigger_delay_stop",
@@ -549,6 +615,7 @@ with tab_sweep:
             ["square", "arbitrary"],
             format_func=lambda x: _WAVEFORM_LABELS[x],
             horizontal=True,
+            key="_sweep_waveform_mode",
         )
         sweep_channel = st.radio(
             "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_sweep_ch",
@@ -617,7 +684,16 @@ with tab_sweep:
                     widths = _generate_widths(
                         config.width_start, config.width_stop, config.width_step,
                     )
-                    instrument.setup_arbitrary(config, widths, channel=ch)
+
+                    def on_upload(i: int, total: int) -> None:
+                        progress.progress(
+                            (i + 1) / total,
+                            text=f"Uploading segments... [{i + 1}/{total}]",
+                        )
+
+                    instrument.setup_arbitrary(
+                        config, widths, channel=ch, callback=on_upload,
+                    )
                 else:
                     instrument.setup(config, config.width_start, channel=ch)
 
@@ -672,34 +748,34 @@ with tab_delay:
     with col_d1:
         st.text_input(
             "Pulse Width [s]",
-            value=format_si(sweep_cfg.width_start),
+            value=format_si(_ds.get("pulse_width", 1e-8)),
             key="_w_delay_pulse_width",
         )
         st.number_input(
             "Delay Start [points] (×8)",
-            value=0, min_value=0, step=8,
+            value=_ds.get("delay_start", 0), min_value=0, step=8,
             key="_w_delay_start",
         )
         st.number_input(
             "Delay Stop [points] (×8)",
-            value=80, min_value=0, step=8,
+            value=_ds.get("delay_stop", 80), min_value=0, step=8,
             key="_w_delay_stop",
         )
 
     with col_d2:
         st.number_input(
             "Delay Step [points] (×8)",
-            value=8, min_value=8, step=8,
+            value=_ds.get("delay_step", 8), min_value=8, step=8,
             key="_w_delay_step",
         )
         st.text_input(
             "Wait Time [s]",
-            value=format_si(sweep_cfg.wait_time),
+            value=format_si(_ds.get("wait_time", 1.0)),
             key="_w_delay_wait_time",
         )
         delay_settling_time = st.number_input(
             "Settling Time [s]",
-            value=0.0, min_value=0.0, step=1.0, format="%.1f",
+            value=_ds.get("settling_time", 0.0), min_value=0.0, step=1.0, format="%.1f",
             help="Wait time before sweep starts (for DUT to reach steady state)",
             key="_w_delay_settling_time",
         )
@@ -829,50 +905,82 @@ with tab_delay:
 
 
 # ================================================================== #
-#  Sidebar: TOML export (after configs are built)
+#  Sidebar: unified TOML save (after all tabs are built)
 # ================================================================== #
-with st.sidebar:
-    st.text("Export TOML")
-    _exp_cols = st.columns(3)
+def _build_toml_data() -> dict:
+    """Build unified TOML dict from current widget state."""
+    freq = common_parsed.get("frequency", 10_000_000.0)
+    data: dict = {
+        "save": {
+            "save_dir": st.session_state.get("_w_save_dir", "configs"),
+            "filename_format": st.session_state.get("_w_filename_format", ""),
+        },
+        "connection": {
+            "visa_address": visa_address,
+        },
+        "common": {
+            "v_on": v_on,
+            "v_off": v_off,
+            "frequency": freq,
+            "period": 1.0 / freq if freq > 0 else 0.0,
+            "trigger_delay": int(trigger_delay),
+        },
+        "simple_pulse": {
+            "pulse_width": pulse_width_val if pulse_width_val is not None else 1e-8,
+            "waveform_mode": st.session_state.get("_pulse_waveform_mode", "square"),
+        },
+    }
 
-    with _exp_cols[0]:
-        if pulse_config is not None:
-            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
-                pulse_config.to_toml(tmp.name)
-                with open(tmp.name) as f:
-                    toml_str = f.read()
-            st.download_button(
-                "Pulse",
-                data=toml_str,
-                file_name="pulse_config.toml",
-                mime="text/plain",
-                key="_export_pulse",
-            )
+    # Width Sweep section
+    ws_data: dict = {"waveform_mode": st.session_state.get("_sweep_waveform_mode", "square")}
+    for name in ("width_start", "width_stop", "width_step", "wait_time"):
+        if name in sweep_parsed:
+            ws_data[name] = sweep_parsed[name]
+    ws_data["settling_time"] = float(st.session_state.get("_w_settling_time", 0.0))
+    _tds = int(st.session_state.get("_w_trigger_delay_stop", 0))
+    if _tds != int(trigger_delay):
+        ws_data["trigger_delay_stop"] = _tds
+    data["width_sweep"] = ws_data
 
-    with _exp_cols[1]:
-        if sweep_config_built is not None:
-            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
-                sweep_config_built.to_toml(tmp.name)
-                with open(tmp.name) as f:
-                    toml_str = f.read()
-            st.download_button(
-                "Width",
-                data=toml_str,
-                file_name="sweep_config.toml",
-                mime="text/plain",
-                key="_export_sweep",
-            )
+    # Delay Sweep section
+    ds_data: dict = {"waveform_mode": st.session_state.get("_delay_waveform_mode", "square")}
+    pw = delay_parsed.get("pulse_width")
+    if pw is not None:
+        ds_data["pulse_width"] = pw
+    wt = delay_parsed.get("wait_time")
+    if wt is not None:
+        ds_data["wait_time"] = wt
+    ds_data["delay_start"] = int(st.session_state.get("_w_delay_start", 0))
+    ds_data["delay_stop"] = int(st.session_state.get("_w_delay_stop", 80))
+    ds_data["delay_step"] = int(st.session_state.get("_w_delay_step", 8))
+    ds_data["settling_time"] = float(st.session_state.get("_w_delay_settling_time", 0.0))
+    data["delay_sweep"] = ds_data
 
-    with _exp_cols[2]:
-        if delay_config_built is not None:
-            with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w") as tmp:
-                delay_config_built.to_toml(tmp.name)
-                with open(tmp.name) as f:
-                    toml_str = f.read()
-            st.download_button(
-                "Delay",
-                data=toml_str,
-                file_name="delay_sweep_config.toml",
-                mime="text/plain",
-                key="_export_delay",
-            )
+    return data
+
+
+# Save button — rendered in sidebar placeholder (after subheader, before expander)
+_all_parse_errors = common_parse_errors + [
+    e for e in (pulse_parse_errors or []) if e not in common_parse_errors
+] + [
+    e for e in (sweep_parse_errors or []) if e not in common_parse_errors
+] + [
+    e for e in (delay_parse_errors or []) if e not in common_parse_errors
+]
+_save_dir = st.session_state.get("_w_save_dir", "").strip()
+_fn_fmt = st.session_state.get("_w_filename_format", "").strip()
+
+with _save_btn_placeholder.container():
+    if st.button(
+        "Save TOML", type="primary", use_container_width=True,
+        disabled=bool(_all_parse_errors) or not _save_dir or not _fn_fmt,
+    ):
+        try:
+            toml_data = _build_toml_data()
+            path = next_save_path(_save_dir, _fn_fmt)
+            save_unified_toml(path, toml_data)
+            st.success(f"Saved: {path.resolve()}")
+            logger.info("Config saved: %s", path)
+        except Exception as exc:
+            st.error(f"Save failed: {exc}")
+            logger.exception("Config save error")

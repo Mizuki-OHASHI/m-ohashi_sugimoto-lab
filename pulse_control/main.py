@@ -14,20 +14,30 @@ import time
 from logging import getLogger
 from pathlib import Path
 
-from config import DEFAULT_VISA_ADDRESS, PulseConfig, SweepConfig
+from config import DEFAULT_VISA_ADDRESS, PulseConfig, SweepConfig, load_unified_toml
 from core import PulseInstrument, _generate_widths, run_sweep
 from log_setup import setup_logging
 
 logger = getLogger(__name__)
 
-DEFAULT_SWEEP_CONFIG = Path("sweep_config.toml")
-DEFAULT_PULSE_CONFIG = Path("pulse_config.toml")
+DEFAULT_CONFIG = Path("configs/config.toml")
 
 
 def main_pulse(config_path: str) -> None:
     """Run simple pulse mode."""
     logger.info("Config file: %s", config_path)
-    config = PulseConfig.from_toml(config_path)
+    data = load_unified_toml(config_path)
+    common = data.get("common", {})
+    sp = data.get("simple_pulse", {})
+    config = PulseConfig(
+        visa_address=data.get("connection", {}).get("visa_address", DEFAULT_VISA_ADDRESS),
+        v_on=common.get("v_on", 0.0),
+        v_off=common.get("v_off", -1.0),
+        frequency=common.get("frequency", 10_000_000.0),
+        trigger_delay=int(common.get("trigger_delay", 0)),
+        pulse_width=sp.get("pulse_width", 1e-8),
+        waveform_mode=sp.get("waveform_mode", "square"),
+    )
 
     errors = config.validate()
     if errors:
@@ -69,7 +79,23 @@ def main_pulse(config_path: str) -> None:
 def main_sweep(config_path: str) -> None:
     """Run pulse width sweep mode."""
     logger.info("Config file: %s", config_path)
-    config = SweepConfig.from_toml(config_path)
+    data = load_unified_toml(config_path)
+    common = data.get("common", {})
+    ws = data.get("width_sweep", {})
+    config = SweepConfig(
+        visa_address=data.get("connection", {}).get("visa_address", DEFAULT_VISA_ADDRESS),
+        v_on=common.get("v_on", 0.0),
+        v_off=common.get("v_off", -1.0),
+        frequency=common.get("frequency", 10_000_000.0),
+        trigger_delay=int(common.get("trigger_delay", 0)),
+        width_start=ws.get("width_start", 1e-8),
+        width_stop=ws.get("width_stop", 5e-8),
+        width_step=ws.get("width_step", 5e-9),
+        wait_time=ws.get("wait_time", 1.0),
+        waveform_mode=ws.get("waveform_mode", "square"),
+        settling_time=ws.get("settling_time", 0.0),
+        trigger_delay_stop=ws.get("trigger_delay_stop"),
+    )
 
     errors = config.validate()
     if errors:
@@ -152,10 +178,10 @@ def main() -> None:
         visa_address = rest[0] if rest else DEFAULT_VISA_ADDRESS
         main_dc(visa_address)
     elif mode == "pulse":
-        config_path = rest[0] if rest else str(DEFAULT_PULSE_CONFIG)
+        config_path = rest[0] if rest else str(DEFAULT_CONFIG)
         main_pulse(config_path)
     else:
-        config_path = rest[0] if rest else str(DEFAULT_SWEEP_CONFIG)
+        config_path = rest[0] if rest else str(DEFAULT_CONFIG)
         main_sweep(config_path)
 
 

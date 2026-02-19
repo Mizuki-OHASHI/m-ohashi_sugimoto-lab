@@ -186,7 +186,12 @@ class PulseInstrument:
     #  Arbitrary waveform setup
     # ------------------------------------------------------------------ #
     def setup_arbitrary(
-        self, config: BaseConfig, widths: list[float], *, channel: int = 1,
+        self,
+        config: BaseConfig,
+        widths: list[float],
+        *,
+        channel: int = 1,
+        callback: Callable[[int, int], None] | None = None,
     ) -> None:
         """Arbitrary Waveform mode: upload all segments up front."""
         logger.info("Starting arbitrary waveform setup (%d segments, CH%d)", len(widths), channel)
@@ -217,7 +222,10 @@ class PulseInstrument:
             w(f":TRACe:SEL {seg}")
             # IEEE 488.2 binary block transfer (little-endian per 81180A spec)
             self.instr.write_binary_values(":TRACe:DATA", waveform, datatype="H")
+            self._query("*OPC?")  # wait for instrument to finish processing
             logger.debug("Uploaded segment %d: duty=%.2f%%, %d points", seg, dcycle, points_per_period)
+            if callback is not None:
+                callback(i, len(widths))
 
         # Select first segment
         w(":TRACe:SEL 1")

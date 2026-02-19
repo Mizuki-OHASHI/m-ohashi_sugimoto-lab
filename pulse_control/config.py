@@ -417,7 +417,7 @@ class DelaySweepConfig(BaseConfig):
         if self.settling_time < 0:
             errors.append("settling_time must be >= 0")
 
-        # Duty cycle range check
+        # Duty cycle range check (DelaySweepConfig)
         if self.frequency > 0 and self.pulse_width > 0:
             dcycle = self.pulse_width * self.frequency * 100
             if dcycle < 0.1 or dcycle > 99.9:
@@ -456,3 +456,40 @@ class DelaySweepConfig(BaseConfig):
             logger.warning("Validation error: %s", e)
 
         return errors
+
+
+# ================================================================== #
+#  Unified TOML (single format for all modes)
+# ================================================================== #
+
+def load_unified_toml(path: str | Path) -> dict:
+    """Load unified-format TOML. Handles period -> frequency conversion."""
+    logger.info("Loading unified TOML: %s", path)
+    data = toml.load(path)
+    common = data.get("common", {})
+    if "period" in common and "frequency" not in common:
+        common["frequency"] = 1.0 / common.pop("period")
+    elif "period" in common:
+        common.pop("period")
+    return data
+
+
+def save_unified_toml(path: str | Path, data: dict) -> None:
+    """Save unified-format TOML."""
+    logger.info("Writing unified TOML: %s", path)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        toml.dump(data, f)
+
+
+def next_save_path(save_dir: str, filename_format: str) -> Path:
+    """Return next available path: {save_dir}/{filename_format}{nn:02d}.toml (starts at 01)."""
+    d = Path(save_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    nn = 1
+    while True:
+        p = d / f"{filename_format}{nn:02d}.toml"
+        if not p.exists():
+            return p
+        nn += 1
