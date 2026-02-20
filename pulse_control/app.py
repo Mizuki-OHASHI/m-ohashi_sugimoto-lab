@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import tempfile
 import time
+from datetime import datetime
 from logging import getLogger
 from pathlib import Path
 
@@ -175,6 +176,17 @@ def _load_config_to_widgets(data: dict) -> None:
     # Simple Pulse
     st.session_state._w_pulse_width = format_si(sp.get("pulse_width", 1e-8))
     # waveform_mode is always "arbitrary" (square mode removed)
+    # Restore saved_pulse_records from simple_pulse.saved_records or width_sweep.delay_table
+    _saved = sp.get("saved_records") or ws.get("delay_table")
+    if _saved is not None:
+        st.session_state.saved_pulse_records = [
+            {
+                "timestamp": "",
+                "pulse_width": format_si(row[0]),
+                "trigger_delay": int(row[1]),
+            }
+            for row in _saved
+        ]
 
     # Width Sweep
     st.session_state._w_width_start = format_si(ws.get("width_start", 1e-8))
@@ -188,6 +200,8 @@ def _load_config_to_widgets(data: dict) -> None:
         td_stop if td_stop is not None else common.get("trigger_delay", 0)
     )
     st.session_state._w_delay_exponent = ws.get("delay_exponent", 1.0)
+    _dm = ws.get("delay_mode", "exponent")
+    st.session_state._w_delay_mode_radio = "Exponent" if _dm == "exponent" else "Table"
 
     # Delay Sweep
     st.session_state._w_delay_pulse_width = format_si(ds.get("pulse_width", 1e-8))
@@ -433,133 +447,164 @@ tab_pulse, tab_sweep, tab_delay = st.tabs(["Simple Pulse", "Width Sweep", "Delay
 #  Simple Pulse tab
 # ================================================================== #
 with tab_pulse:
-    _p_col1, _p_col2 = st.columns(2)
-    with _p_col1:
+    _pulse_left, _pulse_right = st.columns([2, 1])
+
+    with _pulse_left:
         st.text_input(
             "Pulse Width [s]",
             value=format_si(_sp.get("pulse_width", 1e-8)),
             key="_w_pulse_width",
         )
-    pulse_waveform_mode = "arbitrary"
+        pulse_waveform_mode = "arbitrary"
 
-    # Parse pulse-specific fields
-    pulse_parse_errors = list(common_parse_errors)
-    try:
-        pulse_width_val = parse_si(st.session_state._w_pulse_width)
-    except (ValueError, KeyError):
-        pulse_width_val = None
-        pulse_parse_errors.append(
-            f"pulse_width: invalid value \"{st.session_state.get('_w_pulse_width', '')}\""
-        )
+        # Parse pulse-specific fields
+        pulse_parse_errors = list(common_parse_errors)
+        try:
+            pulse_width_val = parse_si(st.session_state._w_pulse_width)
+        except (ValueError, KeyError):
+            pulse_width_val = None
+            pulse_parse_errors.append(
+                f"pulse_width: invalid value \"{st.session_state.get('_w_pulse_width', '')}\""
+            )
 
-    # Build pulse config
-    if not pulse_parse_errors and pulse_width_val is not None:
-        pulse_config = PulseConfig(
-            visa_address=visa_address,
-            v_on=v_on,
-            v_off=v_off,
-            frequency=common_parsed["frequency"],
-            trigger_delay=int(trigger_delay),
-            resolution_n=int(resolution_n),
-            pulse_width=pulse_width_val,
-            waveform_mode=pulse_waveform_mode,
-        )
+        # Build pulse config
+        if not pulse_parse_errors and pulse_width_val is not None:
+            pulse_config = PulseConfig(
+                visa_address=visa_address,
+                v_on=v_on,
+                v_off=v_off,
+                frequency=common_parsed["frequency"],
+                trigger_delay=int(trigger_delay),
+                resolution_n=int(resolution_n),
+                pulse_width=pulse_width_val,
+                waveform_mode=pulse_waveform_mode,
+            )
 
-    # Validation
-    errors_pulse = list(pulse_parse_errors)
-    if pulse_config is not None:
-        errors_pulse.extend(pulse_config.validate())
-
-    if errors_pulse:
-        st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_pulse))
-    else:
-        st.success("Parameters OK")
+        # Validation
+        errors_pulse = list(pulse_parse_errors)
         if pulse_config is not None:
-            _show_arb_info(pulse_config.frequency, [pulse_config.pulse_width], resolution_n=resolution_n)
+            errors_pulse.extend(pulse_config.validate())
 
-    # Per-channel Start/Stop buttons
-    ch1_running = st.session_state.get("ch1_running", False)
-    ch2_running = st.session_state.get("ch2_running", False)
-    can_start = not bool(errors_pulse) and bool(visa_address)
+        if errors_pulse:
+            st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_pulse))
+        else:
+            st.success("Parameters OK")
+            if pulse_config is not None:
+                _show_arb_info(pulse_config.frequency, [pulse_config.pulse_width], resolution_n=resolution_n)
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        start_ch1 = st.button(
-            "Start CH1", disabled=not can_start or ch1_running,
-            type="primary", use_container_width=True,
-        )
-    with c2:
-        stop_ch1 = st.button(
-            "Stop CH1", disabled=not ch1_running,
-            use_container_width=True,
-        )
-    with c3:
-        start_ch2 = st.button(
-            "Start CH2", disabled=not can_start or ch2_running,
-            type="primary", use_container_width=True,
-        )
-    with c4:
-        stop_ch2 = st.button(
-            "Stop CH2", disabled=not ch2_running,
-            use_container_width=True,
-        )
+        # Per-channel toggle + Live toggle
+        ch1_running = st.session_state.get("ch1_running", False)
+        ch2_running = st.session_state.get("ch2_running", False)
+        can_start = not bool(errors_pulse) and bool(visa_address)
 
-    # Start CH1
-    if start_ch1 and pulse_config is not None:
-        try:
-            _pulse_start(pulse_config, channel=1)
-            st.session_state.ch1_running = True
-            logger.info("Pulse CH1 started via UI (%s)", pulse_config.waveform_mode)
+        btn_ch1 = False
+        btn_ch2 = False
+        live_on = False
+        live_off = False
+        is_live = st.session_state.get("live_connection", False)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if ch1_running:
+                btn_ch1 = st.button("Stop CH1", use_container_width=True)
+            else:
+                btn_ch1 = st.button(
+                    "Start CH1", type="primary", use_container_width=True,
+                    disabled=not can_start,
+                )
+        with c2:
+            if ch2_running:
+                btn_ch2 = st.button("Stop CH2", use_container_width=True)
+            else:
+                btn_ch2 = st.button(
+                    "Start CH2", type="primary", use_container_width=True,
+                    disabled=not can_start,
+                )
+        with c3:
+            if is_live:
+                live_off = st.button("Live Off", use_container_width=True)
+            else:
+                live_on = st.button(
+                    "Live On", type="primary", use_container_width=True,
+                    disabled=not bool(visa_address),
+                )
+
+        # Status
+        if st.session_state.get("live_connection"):
+            st.warning("Live Connection: ON (front panel locked in REMOTE mode)")
+        if ch1_running:
+            st.info("CH1: Pulse output is ON.")
+        if ch2_running:
+            st.info("CH2: Pulse output is ON.")
+
+    with _pulse_right:
+        if "saved_pulse_records" not in st.session_state:
+            st.session_state.saved_pulse_records = []
+
+        _sv_col1, _sv_col2 = st.columns(2)
+        with _sv_col1:
+            _btn_save = st.button("Save", type="primary", use_container_width=True)
+        with _sv_col2:
+            _btn_clear = st.button("Clear", use_container_width=True)
+
+        if _btn_save:
+            st.session_state.saved_pulse_records.append({
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "pulse_width": st.session_state.get("_w_pulse_width", ""),
+                "trigger_delay": int(trigger_delay),
+            })
             st.rerun()
-        except Exception as exc:
-            st.error(f"Error: {exc}")
-            logger.exception("Error starting pulse CH1")
 
-    # Start CH2
-    if start_ch2 and pulse_config is not None:
-        try:
-            _pulse_start(pulse_config, channel=2)
-            st.session_state.ch2_running = True
-            logger.info("Pulse CH2 started via UI (%s)", pulse_config.waveform_mode)
+        if _btn_clear:
+            st.session_state.saved_pulse_records = []
             st.rerun()
-        except Exception as exc:
-            st.error(f"Error: {exc}")
-            logger.exception("Error starting pulse CH2")
 
-    # Stop CH1
-    if stop_ch1 and ch1_running:
-        try:
-            _pulse_stop(visa_address, channel=1)
-        except Exception as exc:
-            logger.error("Teardown CH1 error: %s", exc)
-        logger.info("Pulse CH1 stopped via UI")
-        st.rerun()
+        if st.session_state.saved_pulse_records:
+            lines = ["timestamp,pulse_width,trigger_delay"]
+            for r in st.session_state.saved_pulse_records:
+                lines.append(f"{r['timestamp']},{r['pulse_width']},{r['trigger_delay']}")
+            st.markdown("```csv\n" + "\n".join(lines) + "\n```")
 
-    # Stop CH2
-    if stop_ch2 and ch2_running:
-        try:
-            _pulse_stop(visa_address, channel=2)
-        except Exception as exc:
-            logger.error("Teardown CH2 error: %s", exc)
-        logger.info("Pulse CH2 stopped via UI")
-        st.rerun()
+    # CH1 toggle
+    if btn_ch1:
+        if ch1_running:
+            try:
+                _pulse_stop(visa_address, channel=1)
+            except Exception as exc:
+                logger.error("Teardown CH1 error: %s", exc)
+            logger.info("Pulse CH1 stopped via UI")
+            st.rerun()
+        elif pulse_config is not None:
+            try:
+                _pulse_start(pulse_config, channel=1)
+                st.session_state.ch1_running = True
+                logger.info("Pulse CH1 started via UI (%s)", pulse_config.waveform_mode)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                logger.exception("Error starting pulse CH1")
 
-    # Live Connection toggle
-    # st.divider()
-    st.toggle(
-        "Live Connection",
-        value=st.session_state.get("live_connection", False),
-        key="_w_live_connection",
-        help="Keep connection open for instant Trigger Delay changes. "
-             "Front panel will be locked in REMOTE mode while active.",
-    )
+    # CH2 toggle
+    if btn_ch2:
+        if ch2_running:
+            try:
+                _pulse_stop(visa_address, channel=2)
+            except Exception as exc:
+                logger.error("Teardown CH2 error: %s", exc)
+            logger.info("Pulse CH2 stopped via UI")
+            st.rerun()
+        elif pulse_config is not None:
+            try:
+                _pulse_start(pulse_config, channel=2)
+                st.session_state.ch2_running = True
+                logger.info("Pulse CH2 started via UI (%s)", pulse_config.waveform_mode)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                logger.exception("Error starting pulse CH2")
 
-    # Live connection state management
-    prev_live = st.session_state.get("live_connection", False)
-    curr_live = st.session_state.get("_w_live_connection", False)
-
-    if curr_live and not prev_live:
-        # Toggle turned ON: open connection
+    # Live connection state management (button-driven)
+    if live_on:
         try:
             inst = PulseInstrument(visa_address)
             st.session_state.live_instrument = inst
@@ -570,18 +615,17 @@ with tab_pulse:
                     inst.set_trigger_delay(delay_val, channel=ch_num)
             st.session_state.last_trigger_delay = delay_val
             logger.info("Live connection opened")
+            st.rerun()
         except Exception as exc:
             st.error(f"Live connection failed: {exc}")
             st.session_state.live_connection = False
-            st.session_state._w_live_connection = False
             logger.exception("Live connection error")
 
-    elif not curr_live and prev_live:
-        # Toggle turned OFF: close connection
+    if live_off:
         _close_live_connection()
+        st.rerun()
 
-    elif curr_live and prev_live:
-        # Toggle stays ON: check for trigger delay changes
+    if is_live and not live_off:
         delay_val = int(trigger_delay)
         prev_delay = st.session_state.get("last_trigger_delay")
         if prev_delay is not None and delay_val != prev_delay:
@@ -597,24 +641,13 @@ with tab_pulse:
                     st.error(f"Failed to update trigger delay: {exc}")
                     logger.exception("Live trigger delay update error")
                     _close_live_connection()
-                    st.session_state._w_live_connection = False
-
-    st.session_state.live_connection = curr_live
-
-    # Status
-    if st.session_state.get("live_connection"):
-        st.warning("Live Connection: ON (front panel locked in REMOTE mode)")
-    if ch1_running:
-        st.info("CH1: Pulse output is ON.")
-    if ch2_running:
-        st.info("CH2: Pulse output is ON.")
 
 
 # ================================================================== #
 #  Width Sweep tab
 # ================================================================== #
 with tab_sweep:
-    col_range, col_timing, col_opts = st.columns([2, 2, 1])
+    col_range, col_timing, col_opts = st.columns(3)
 
     with col_range:
         st.text_input(
@@ -645,26 +678,50 @@ with tab_sweep:
             help="Wait time before sweep starts (for DUT to reach steady state)",
             key="_w_settling_time",
         )
-        sweep_trigger_delay_stop = st.number_input(
-            "Trigger Delay Stop [points] (×8)",
-            value=_common.get("trigger_delay", 0), min_value=0, step=8,
-            help="End value for trigger delay sweep. "
-                 "Set equal to Trigger Delay for fixed delay.",
-            key="_w_trigger_delay_stop",
+        sweep_channel = st.radio(
+            "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_sweep_ch",
         )
 
     waveform_mode = "arbitrary"
     with col_opts:
-        sweep_channel = st.radio(
-            "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_sweep_ch",
+        delay_mode = st.radio(
+            "Delay Mode", ["Exponent", "Table"],
+            horizontal=True, key="_w_delay_mode_radio",
         )
-        delay_exponent = st.number_input(
-            "Delay Exponent",
-            value=_ws.get("delay_exponent", 1.0),
-            min_value=-4.0, max_value=4.0, step=0.25, format="%.2f",
-            help="delay = a × pw^n + b (1=linear, -1=1/pw)",
-            key="_w_delay_exponent",
-        )
+        _delay_mode_val = "exponent" if delay_mode == "Exponent" else "table"
+
+        if _delay_mode_val == "exponent":
+            sweep_trigger_delay_stop = st.number_input(
+                "Trigger Delay Stop [points] (×8)",
+                value=_common.get("trigger_delay", 0), min_value=0, step=8,
+                help="End value for trigger delay sweep. "
+                     "Set equal to Trigger Delay for fixed delay.",
+                key="_w_trigger_delay_stop",
+            )
+            delay_exponent = st.number_input(
+                "Delay Exponent",
+                value=_ws.get("delay_exponent", 1.0),
+                min_value=-4.0, max_value=4.0, step=0.25, format="%.2f",
+                help="delay = a × pw^n + b (1=linear, -1=1/pw)",
+                key="_w_delay_exponent",
+            )
+        else:
+            sweep_trigger_delay_stop = int(trigger_delay)  # not used in table mode
+            delay_exponent = 1.0  # not used in table mode
+            records = st.session_state.get("saved_pulse_records", [])
+            if len(records) < 2:
+                st.warning("Table mode requires >= 2 saved records (use Simple Pulse tab).")
+            else:
+                # st.caption(f"Delay table: {len(records)} points")
+                # for r in records:
+                #     st.text(f"  {r['pulse_width']}s → {r['trigger_delay']} pts")
+                with st.expander(f"Delay Table: {len(records)} points"):
+                    # for r in records:
+                    #     st.text(f"  {r['pulse_width']}s → {r['trigger_delay']} pts")
+                    st.table({
+                        "Pulse Width [s]": [r["pulse_width"] for r in records],
+                        "Trigger Delay [pts]": [r["trigger_delay"] for r in records],
+                    })
     
     # st.info("Pulse center is fixed at the middle of the period during sweep.")
 
@@ -688,6 +745,15 @@ with tab_sweep:
     # Build sweep config
     if not sweep_parse_errors:
         _delay_stop_val = int(sweep_trigger_delay_stop)
+        # Build delay_table from saved_pulse_records when in table mode
+        _delay_table: list[tuple[float, int]] | None = None
+        if _delay_mode_val == "table":
+            _records = st.session_state.get("saved_pulse_records", [])
+            if _records:
+                _delay_table = [
+                    (parse_si(r["pulse_width"]), int(r["trigger_delay"]))
+                    for r in _records
+                ]
         sweep_config_built = SweepConfig(
             visa_address=visa_address,
             v_on=v_on,
@@ -703,6 +769,8 @@ with tab_sweep:
             settling_time=sweep_settling_time,
             trigger_delay_stop=_delay_stop_val if _delay_stop_val != int(trigger_delay) else None,
             delay_exponent=delay_exponent,
+            delay_mode=_delay_mode_val,
+            delay_table=_delay_table,
         )
 
     # Validation
@@ -974,6 +1042,10 @@ def _build_toml_data() -> dict:
         },
         "simple_pulse": {
             "pulse_width": pulse_width_val if pulse_width_val is not None else 1e-8,
+            **({"saved_records": [
+                [parse_si(r["pulse_width"]), int(r["trigger_delay"])]
+                for r in st.session_state.get("saved_pulse_records", [])
+            ]} if st.session_state.get("saved_pulse_records") else {}),
         },
     }
 
@@ -989,6 +1061,18 @@ def _build_toml_data() -> dict:
     _de = float(st.session_state.get("_w_delay_exponent", 1.0))
     if _de != 1.0:
         ws_data["delay_exponent"] = _de
+    # Delay mode + table
+    _dm = st.session_state.get("_w_delay_mode_radio", "Exponent")
+    _dm_val = "exponent" if _dm == "Exponent" else "table"
+    if _dm_val != "exponent":
+        ws_data["delay_mode"] = _dm_val
+    if _dm_val == "table":
+        _records = st.session_state.get("saved_pulse_records", [])
+        if _records:
+            ws_data["delay_table"] = [
+                [parse_si(r["pulse_width"]), int(r["trigger_delay"])]
+                for r in _records
+            ]
     data["width_sweep"] = ws_data
 
     # Delay Sweep section

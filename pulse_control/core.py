@@ -319,17 +319,25 @@ def run_sweep(
     widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
     total = len(widths)
 
-    # Delay sweep parameters
+    # Delay interpolation mode
+    use_table = config.delay_mode == "table" and config.delay_table is not None
+
+    # --- Table mode: build sorted arrays for numpy.interp ---
+    _table_pw: np.ndarray | None = None
+    _table_delay: np.ndarray | None = None
+    if use_table:
+        sorted_table = sorted(config.delay_table, key=lambda r: r[0])
+        _table_pw = np.array([r[0] for r in sorted_table])
+        _table_delay = np.array([r[1] for r in sorted_table], dtype=float)
+
+    # --- Exponent mode: pre-compute coefficients ---
     delay_start = config.trigger_delay
     delay_stop = config.trigger_delay_stop
     sweep_delay = delay_stop is not None and delay_stop != delay_start
 
-    # Pre-compute coefficients for delay interpolation:
-    #   delay(pw) = a * pw^n + b  (n = delay_exponent)
-    #   delay(width_start) = delay_start, delay(width_stop) = delay_stop
     _coeff_a = _coeff_b = 0.0
     _exp = config.delay_exponent
-    if sweep_delay:
+    if not use_table and sweep_delay:
         f_start = config.width_start ** _exp
         f_stop = config.width_stop ** _exp
         if f_start != f_stop:
@@ -338,9 +346,12 @@ def run_sweep(
 
     def _apply_delay(i: int) -> None:
         """Interpolate and apply trigger delay for step *i*."""
-        if not sweep_delay:
+        if use_table:
+            raw = float(np.interp(widths[i], _table_pw, _table_delay))
+        elif sweep_delay:
+            raw = _coeff_a * widths[i] ** _exp + _coeff_b
+        else:
             return
-        raw = _coeff_a * widths[i] ** _exp + _coeff_b
         delay = round(raw / 8) * 8
         for ch in channels:
             instrument.set_trigger_delay(delay, channel=ch)

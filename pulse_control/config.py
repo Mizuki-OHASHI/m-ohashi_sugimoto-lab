@@ -205,6 +205,8 @@ class SweepConfig(BaseConfig):
     settling_time: float = 0.0  # Initial settling time before sweep [s]
     trigger_delay_stop: int | None = None  # None = fixed delay; set to sweep delay
     delay_exponent: float = 1.0  # delay = a * pw^n + b (1=linear, -1=1/pw)
+    delay_mode: str = "exponent"  # "exponent" | "table"
+    delay_table: list[tuple[float, int]] | None = None  # [(pw_sec, delay_points), ...]
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
@@ -214,6 +216,11 @@ class SweepConfig(BaseConfig):
         If both are present, frequency takes precedence.
         """
         flat = cls._load_and_flatten_toml(path)
+        # Convert delay_table from list-of-lists to list-of-tuples
+        if "delay_table" in flat and flat["delay_table"] is not None:
+            flat["delay_table"] = [
+                (float(row[0]), int(row[1])) for row in flat["delay_table"]
+            ]
         # Keep only valid dataclass field names
         valid_keys = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in flat.items() if k in valid_keys}
@@ -240,6 +247,10 @@ class SweepConfig(BaseConfig):
                    if self.trigger_delay_stop is not None else {}),
                 **({"delay_exponent": self.delay_exponent}
                    if self.delay_exponent != 1.0 else {}),
+                **({"delay_mode": self.delay_mode}
+                   if self.delay_mode != "exponent" else {}),
+                **({"delay_table": [list(row) for row in self.delay_table]}
+                   if self.delay_table is not None else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -271,16 +282,44 @@ class SweepConfig(BaseConfig):
         if self.settling_time < 0:
             errors.append("settling_time must be >= 0")
 
-        if self.trigger_delay_stop is not None:
-            if self.trigger_delay_stop < 0:
-                errors.append("trigger_delay_stop must be >= 0")
-            if self.trigger_delay_stop % 8 != 0:
-                errors.append("trigger_delay_stop must be a multiple of 8")
-
-        if abs(self.delay_exponent) < 0.25 or abs(self.delay_exponent) > 4.0:
+        if self.delay_mode not in ("exponent", "table"):
             errors.append(
-                f"delay_exponent abs must be 0.25–4.0, got {self.delay_exponent}"
+                f"delay_mode must be 'exponent' or 'table', got '{self.delay_mode}'"
             )
+
+        if self.delay_mode == "exponent":
+            if self.trigger_delay_stop is not None:
+                if self.trigger_delay_stop < 0:
+                    errors.append("trigger_delay_stop must be >= 0")
+                if self.trigger_delay_stop % 8 != 0:
+                    errors.append("trigger_delay_stop must be a multiple of 8")
+
+            if abs(self.delay_exponent) < 0.25 or abs(self.delay_exponent) > 4.0:
+                errors.append(
+                    f"delay_exponent abs must be 0.25–4.0, got {self.delay_exponent}"
+                )
+
+        if self.delay_mode == "table":
+            if self.delay_table is None or len(self.delay_table) < 2:
+                errors.append(
+                    "delay_table must have at least 2 entries for table mode"
+                )
+            elif self.delay_table is not None:
+                table_pws = [row[0] for row in self.delay_table]
+                table_min = min(table_pws)
+                table_max = max(table_pws)
+                if self.width_start < table_min or self.width_start > table_max:
+                    errors.append(
+                        f"width_start ({self.width_start:.4e} s) is outside "
+                        f"delay table range ({table_min:.4e}–{table_max:.4e} s). "
+                        "Extrapolation is not allowed."
+                    )
+                if self.width_stop < table_min or self.width_stop > table_max:
+                    errors.append(
+                        f"width_stop ({self.width_stop:.4e} s) is outside "
+                        f"delay table range ({table_min:.4e}–{table_max:.4e} s). "
+                        "Extrapolation is not allowed."
+                    )
 
         if self.waveform_mode not in ("square", "arbitrary"):
             errors.append(
@@ -494,6 +533,11 @@ def load_unified_toml(path: str | Path) -> dict:
         ws["delay_exponent"] = -1.0 if _interp == "inverse_width" else 1.0
     elif "delay_interp" in ws:
         ws.pop("delay_interp")
+    # Convert delay_table from list-of-lists to list-of-tuples
+    if "delay_table" in ws and ws["delay_table"] is not None:
+        ws["delay_table"] = [
+            (float(row[0]), int(row[1])) for row in ws["delay_table"]
+        ]
     return data
 
 
