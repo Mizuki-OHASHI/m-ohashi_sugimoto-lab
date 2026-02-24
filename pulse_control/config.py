@@ -207,6 +207,7 @@ class SweepConfig(BaseConfig):
     delay_exponent: float = 1.0  # delay = a * pw^n + b (1=linear, -1=1/pw)
     delay_mode: str = "exponent"  # "exponent" | "table"
     delay_table: list[tuple[float, int]] | None = None  # [(pw_sec, delay_points), ...]
+    step_zones: list[tuple[float, float]] | None = None  # [(boundary_s, step_s), ...]
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
@@ -220,6 +221,10 @@ class SweepConfig(BaseConfig):
         if "delay_table" in flat and flat["delay_table"] is not None:
             flat["delay_table"] = [
                 (float(row[0]), int(row[1])) for row in flat["delay_table"]
+            ]
+        if "step_zones" in flat and flat["step_zones"] is not None:
+            flat["step_zones"] = [
+                (float(row[0]), float(row[1])) for row in flat["step_zones"]
             ]
         # Keep only valid dataclass field names
         valid_keys = {f.name for f in fields(cls)}
@@ -251,6 +256,8 @@ class SweepConfig(BaseConfig):
                    if self.delay_mode != "exponent" else {}),
                 **({"delay_table": [list(row) for row in self.delay_table]}
                    if self.delay_table is not None else {}),
+                **({"step_zones": [list(row) for row in self.step_zones]}
+                   if self.step_zones is not None else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -321,6 +328,20 @@ class SweepConfig(BaseConfig):
                         "Extrapolation is not allowed."
                     )
 
+        if self.step_zones:
+            boundaries = [b for b, _ in self.step_zones]
+            if boundaries != sorted(boundaries):
+                errors.append("step_zones boundaries must be in ascending order")
+            for b, s in self.step_zones:
+                if s <= 0:
+                    errors.append(f"step_zones step must be positive, got {s}")
+                if b <= self.width_start or b >= self.width_stop:
+                    errors.append(
+                        f"step_zones boundary {b:.4e} must be between "
+                        f"width_start ({self.width_start:.4e}) and "
+                        f"width_stop ({self.width_stop:.4e})"
+                    )
+
         if self.waveform_mode not in ("square", "arbitrary"):
             errors.append(
                 f"waveform_mode must be 'square' or 'arbitrary', got '{self.waveform_mode}'"
@@ -345,7 +366,10 @@ class SweepConfig(BaseConfig):
         if self.waveform_mode == "arbitrary":
             from core import _calc_arb_params, _generate_widths
 
-            widths = _generate_widths(self.width_start, self.width_stop, self.width_step)
+            widths = _generate_widths(
+                self.width_start, self.width_stop, self.width_step,
+                step_zones=self.step_zones,
+            )
             try:
                 sample_rate, points_per_period = _calc_arb_params(self.frequency, widths)
                 if sample_rate < 10e6 or sample_rate > 4.2e9:

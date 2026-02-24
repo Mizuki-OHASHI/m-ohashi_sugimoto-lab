@@ -254,6 +254,7 @@ def run_integrated_sweep(
             sweep_config.width_start,
             sweep_config.width_stop,
             sweep_config.width_step,
+            step_zones=sweep_config.step_zones,
         )
         logger.info("Uploading %d waveform segments...", len(widths))
         for ch in channels:

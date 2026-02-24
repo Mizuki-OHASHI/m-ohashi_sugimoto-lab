@@ -205,6 +205,16 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_delay_exponent = ws.get("delay_exponent", 1.0)
     _dm = ws.get("delay_mode", "exponent")
     st.session_state._w_delay_mode_radio = "Exponent" if _dm == "exponent" else "Table"
+    # Variable step zones
+    _sz = ws.get("step_zones", [])
+    st.session_state._w_variable_step = bool(_sz)
+    if _sz:
+        z1 = _sz[0] if len(_sz) >= 1 else [None, None]
+        st.session_state._w_step_zone1_boundary = format_si(z1[0]) if z1[0] is not None else ""
+        st.session_state._w_step_zone1_step = format_si(z1[1]) if z1[1] is not None else ""
+        z2 = _sz[1] if len(_sz) >= 2 else [None, None]
+        st.session_state._w_step_zone2_boundary = format_si(z2[0]) if z2[0] is not None else ""
+        st.session_state._w_step_zone2_step = format_si(z2[1]) if z2[1] is not None else ""
 
     # Integration (Auto Sweep)
     ig = data.get("integration", {})
@@ -676,7 +686,56 @@ with tab_sweep:
             "Width Step [s]",
             value=format_si(_ws.get("width_step", 5e-9)),
             key="_w_width_step",
+            help="Default step (or step for last zone when variable step is enabled)",
         )
+        _var_step_default = bool(_ws.get("step_zones"))
+        variable_step = st.checkbox(
+            "Variable step size", value=_var_step_default, key="_w_variable_step",
+        )
+        if variable_step:
+            _sz = _ws.get("step_zones", [])
+            _z1 = _sz[0] if len(_sz) >= 1 else (None, None)
+            _z2 = _sz[1] if len(_sz) >= 2 else (None, None)
+            # Build expander title showing current zone values
+            _exp_parts: list[str] = []
+            _z1_b = st.session_state.get("_w_step_zone1_boundary", "").strip()
+            _z1_s = st.session_state.get("_w_step_zone1_step", "").strip()
+            if _z1_b and _z1_s:
+                _exp_parts.append(f"{_z1_s} (~ {_z1_b})")
+            _z2_b = st.session_state.get("_w_step_zone2_boundary", "").strip()
+            _z2_s = st.session_state.get("_w_step_zone2_step", "").strip()
+            if _z2_b and _z2_s:
+                _exp_parts.append(f"{_z2_s} (~ {_z2_b})")
+            _exp_title = "Step Zones: " + ", ".join(_exp_parts) if _exp_parts else "Step Zones"
+            with st.expander(_exp_title, expanded=True):
+                _zc1, _zc2 = st.columns(2)
+                with _zc1:
+                    st.text_input(
+                        "Zone 1: width ≤ [s]",
+                        value=format_si(_z1[0]) if _z1[0] is not None else "",
+                        key="_w_step_zone1_boundary",
+                    )
+                with _zc2:
+                    st.text_input(
+                        "Zone 1 step [s]",
+                        value=format_si(_z1[1]) if _z1[1] is not None else "",
+                        key="_w_step_zone1_step",
+                    )
+                _zc3, _zc4 = st.columns(2)
+                with _zc3:
+                    st.text_input(
+                        "Zone 2: width ≤ [s]",
+                        value=format_si(_z2[0]) if _z2[0] is not None else "",
+                        key="_w_step_zone2_boundary",
+                        help="Leave blank if only 1 zone boundary needed",
+                    )
+                with _zc4:
+                    st.text_input(
+                        "Zone 2 step [s]",
+                        value=format_si(_z2[1]) if _z2[1] is not None else "",
+                        key="_w_step_zone2_step",
+                    )
+                st.caption("Above last boundary → uses Width Step as default step")
 
     with col_timing:
         st.text_input(
@@ -754,6 +813,21 @@ with tab_sweep:
                 f"{name}: invalid value \"{st.session_state.get(key, '')}\""
             )
 
+    # Build step_zones from UI
+    _step_zones: list[tuple[float, float]] | None = None
+    if st.session_state.get("_w_variable_step", False):
+        _zones_list: list[tuple[float, float]] = []
+        for _zn in ("zone1", "zone2"):
+            _b_raw = st.session_state.get(f"_w_step_{_zn}_boundary", "").strip()
+            _s_raw = st.session_state.get(f"_w_step_{_zn}_step", "").strip()
+            if _b_raw and _s_raw:
+                try:
+                    _zones_list.append((parse_si(_b_raw), parse_si(_s_raw)))
+                except ValueError:
+                    sweep_parse_errors.append(f"step {_zn}: invalid value")
+        if _zones_list:
+            _step_zones = _zones_list
+
     # Build sweep config
     if not sweep_parse_errors:
         _delay_stop_val = int(sweep_trigger_delay_stop)
@@ -783,6 +857,7 @@ with tab_sweep:
             delay_exponent=delay_exponent,
             delay_mode=_delay_mode_val,
             delay_table=_delay_table,
+            step_zones=_step_zones,
         )
 
     # Validation
@@ -799,6 +874,7 @@ with tab_sweep:
                 sweep_config_built.width_start,
                 sweep_config_built.width_stop,
                 sweep_config_built.width_step,
+                step_zones=sweep_config_built.step_zones,
             )
             _show_arb_info(sweep_config_built.frequency, widths, resolution_n=resolution_n)
 
@@ -817,6 +893,7 @@ with tab_sweep:
 
             widths = _generate_widths(
                 config.width_start, config.width_stop, config.width_step,
+                step_zones=config.step_zones,
             )
 
             def on_upload(i: int, total: int) -> None:
@@ -1016,7 +1093,10 @@ with tab_sweep:
             dmm.configure_dc_voltage()
 
             # Upload waveforms (once)
-            widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
+            widths = _generate_widths(
+                config.width_start, config.width_stop, config.width_step,
+                step_zones=config.step_zones,
+            )
 
             def on_auto_upload(i: int, total: int) -> None:
                 progress.progress(
@@ -1357,6 +1437,9 @@ def _build_toml_data() -> dict:
                 [parse_si(r["pulse_width"]), float(r["trigger_delay"])]
                 for r in _records
             ]
+    # Step zones
+    if _step_zones:
+        ws_data["step_zones"] = [list(row) for row in _step_zones]
     data["width_sweep"] = ws_data
 
     # Delay Sweep section
@@ -1398,6 +1481,7 @@ if "frequency" in common_parsed:
             sweep_config_built.width_start,
             sweep_config_built.width_stop,
             sweep_config_built.width_step,
+            step_zones=sweep_config_built.step_zones,
         )
     elif delay_config_built is not None:
         _arb_widths = [delay_config_built.pulse_width]

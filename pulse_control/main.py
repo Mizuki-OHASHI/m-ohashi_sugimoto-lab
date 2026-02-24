@@ -129,7 +129,10 @@ def main_sweep(config_path: str) -> None:
     logger.info("Starting sweep...")
     instrument = PulseInstrument(config.visa_address)
     try:
-        widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
+        widths = _generate_widths(
+            config.width_start, config.width_stop, config.width_step,
+            step_zones=config.step_zones,
+        )
         instrument.setup_arbitrary(config, widths)
         run_sweep(config, instrument)
         instrument.teardown()

@@ -352,7 +352,10 @@ def run_sweep(
     if channels is None:
         channels = [1]
 
-    widths = _generate_widths(config.width_start, config.width_stop, config.width_step)
+    widths = _generate_widths(
+        config.width_start, config.width_stop, config.width_step,
+        step_zones=config.step_zones,
+    )
     total = len(widths)
 
     # Delay interpolation mode
@@ -422,10 +425,38 @@ def run_sweep(
     time.sleep(config.wait_time)
 
 
-def _generate_widths(start: float, stop: float, step: float) -> list[float]:
-    """Generate a list of widths from start to stop with the given step."""
-    n = int(round((stop - start) / step)) + 1
-    return [round(start + i * step, 10) for i in range(n)]
+def _generate_widths(
+    start: float, stop: float, step: float,
+    *, step_zones: list[tuple[float, float]] | None = None,
+) -> list[float]:
+    """Generate a list of widths from start to stop.
+
+    Parameters
+    ----------
+    step : default step size (used for the last zone or when step_zones is None)
+    step_zones : [(boundary, zone_step), ...] sorted ascending by boundary.
+        Each zone applies from the previous boundary (or start) up to boundary.
+        The default *step* is used above the last boundary.
+    """
+    if not step_zones:
+        n = int(round((stop - start) / step)) + 1
+        return [round(start + i * step, 10) for i in range(n)]
+
+    # Build zone list: [(upper_bound, zone_step), ...]
+    zones = list(step_zones) + [(stop, step)]
+    widths: list[float] = [round(start, 10)]
+    current = start
+    zone_idx = 0
+    while current < stop - 1e-15:
+        # Advance zone if we've passed the boundary
+        while zone_idx < len(zones) - 1 and current >= zones[zone_idx][0] - 1e-15:
+            zone_idx += 1
+        zone_step = zones[zone_idx][1]
+        current = round(current + zone_step, 10)
+        if current > stop + 1e-15:
+            break
+        widths.append(current)
+    return widths
 
 
 def _generate_delays(start: int, stop: int, step: int) -> list[int]:
