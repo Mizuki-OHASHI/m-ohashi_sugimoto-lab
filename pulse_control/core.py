@@ -279,6 +279,42 @@ class PulseInstrument:
         logger.info("DC 0V set complete")
 
     # ------------------------------------------------------------------ #
+    #  Between-cycle DC 0V / restore (for auto sweep)
+    # ------------------------------------------------------------------ #
+    def set_between_cycles_dc_zero(self, *, channel: int = 1) -> None:
+        """Set channel to DC 0V between sweep cycles.
+
+        Output stays ON so the load sees a clean 0V (no relay transients).
+        Segments remain in memory for later restore via restore_user_mode().
+        """
+        logger.info("Setting between-cycle DC 0V (CH%d)", channel)
+        w = self._write
+        w(f":INST CH{channel}")
+        w(":FUNC:MODE FIX")
+        w(":FUNCtion:SHAPe DC")
+        w(":DC:OFFSet 0")
+        self._query("*OPC?")
+
+    def restore_user_mode(
+        self, config: BaseConfig, *, channel: int = 1,
+    ) -> None:
+        """Restore USER (arbitrary) mode after between-cycle DC 0V.
+
+        Assumes segments are still in AWG memory (no TRAC:DEL:ALL was called).
+        """
+        logger.info("Restoring USER mode (CH%d)", channel)
+        w = self._write
+        w(f":INST CH{channel}")
+        w(":FUNC:MODE USER")
+        ampl = abs(config.v_on - config.v_off) / 2
+        offs = (config.v_on + config.v_off) / 4
+        w(f":VOLT:AMPLitude {ampl}")
+        w(f":VOLT:OFFSet {offs}")
+        w(":TRACe:SEL 1")
+        w(":OUTPut ON")
+        self._query("*OPC?")
+
+    # ------------------------------------------------------------------ #
     #  Teardown (based on VBA WaveForm DC switch / SweepTau cleanup)
     # ------------------------------------------------------------------ #
     def teardown(self, *, channel: int = 1) -> None:
