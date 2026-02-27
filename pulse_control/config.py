@@ -562,6 +562,11 @@ def load_unified_toml(path: str | Path) -> dict:
         ws["delay_table"] = [
             (float(row[0]), int(row[1])) for row in ws["delay_table"]
         ]
+    # Convert step_zones from list-of-lists to list-of-tuples
+    if "step_zones" in ws and ws["step_zones"] is not None:
+        ws["step_zones"] = [
+            (float(row[0]), float(row[1])) for row in ws["step_zones"]
+        ]
     return data
 
 

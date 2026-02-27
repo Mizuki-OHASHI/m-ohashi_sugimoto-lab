@@ -6,6 +6,7 @@ Usage:
 
 from __future__ import annotations
 
+import csv
 import re
 import tempfile
 import time
@@ -30,6 +31,7 @@ from core_integration import IntegrationConfig, detect_ramp_start
 from log_setup import setup_logging
 
 DEFAULT_CONFIG = Path("configs/config.toml")
+SAVED_RECORDS_CSV = Path("saved_pulse_records.csv")
 
 setup_logging()
 logger = getLogger(__name__)
@@ -72,6 +74,31 @@ def format_si(value: float) -> str:
     # Fallback for extremely small values
     factor, prefix = _FORMAT_PREFIXES[-1]
     return f"{value / factor:g}{prefix}"
+
+
+def _save_records_to_csv(records: list[dict]) -> None:
+    """Save pulse records to CSV on disk."""
+    with open(SAVED_RECORDS_CSV, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "pulse_width", "trigger_delay"])
+        for r in records:
+            writer.writerow([r["timestamp"], r["pulse_width"], r["trigger_delay"]])
+
+
+def _load_records_from_csv() -> list[dict]:
+    """Load pulse records from CSV if it exists."""
+    if not SAVED_RECORDS_CSV.exists():
+        return []
+    records = []
+    with open(SAVED_RECORDS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            records.append({
+                "timestamp": row["timestamp"],
+                "pulse_width": row["pulse_width"],
+                "trigger_delay": int(row["trigger_delay"]),
+            })
+    return records
 
 
 _CHANNEL_MAP = {"CH1": [1], "CH2": [2], "Both": [1, 2]}
@@ -190,6 +217,11 @@ def _load_config_to_widgets(data: dict) -> None:
             }
             for row in _saved
         ]
+    elif not st.session_state.get("saved_pulse_records"):
+        # Restore from CSV on disk (crash recovery)
+        _csv_records = _load_records_from_csv()
+        if _csv_records:
+            st.session_state.saved_pulse_records = _csv_records
 
     # Width Sweep
     st.session_state._w_width_start = format_si(ws.get("width_start", 1e-8))
@@ -570,15 +602,30 @@ with tab_pulse:
             _btn_clear = st.button("Clear", use_container_width=True)
 
         if _btn_save:
-            st.session_state.saved_pulse_records.append({
+            pw = st.session_state.get("_w_pulse_width", "")
+            new_record = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "pulse_width": st.session_state.get("_w_pulse_width", ""),
+                "pulse_width": pw,
                 "trigger_delay": int(trigger_delay),
-            })
+            }
+            records = st.session_state.saved_pulse_records
+            # Overwrite if same pulse_width exists
+            replaced = False
+            for i, r in enumerate(records):
+                if r["pulse_width"] == pw:
+                    records[i] = new_record
+                    replaced = True
+                    break
+            if not replaced:
+                records.append(new_record)
+            # Sort by pulse_width
+            records.sort(key=lambda r: parse_si(r["pulse_width"]))
+            _save_records_to_csv(records)
             st.rerun()
 
         if _btn_clear:
             st.session_state.saved_pulse_records = []
+            _save_records_to_csv([])
             st.rerun()
 
         if st.session_state.saved_pulse_records:

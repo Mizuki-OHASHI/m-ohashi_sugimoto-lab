@@ -97,6 +97,9 @@ def main_sweep(config_path: str) -> None:
         settling_time=ws.get("settling_time", 0.0),
         trigger_delay_stop=ws.get("trigger_delay_stop"),
         delay_exponent=ws.get("delay_exponent", 1.0),
+        delay_mode=ws.get("delay_mode", "exponent"),
+        delay_table=ws.get("delay_table"),
+        step_zones=ws.get("step_zones"),
     )
 
     errors = config.validate()
@@ -169,6 +172,7 @@ def main_integration(config_path: str) -> None:
         delay_exponent=ws.get("delay_exponent", 1.0),
         delay_mode=ws.get("delay_mode", "exponent"),
         delay_table=ws.get("delay_table"),
+        step_zones=ws.get("step_zones"),
     )
 
     integration_config = IntegrationConfig(
