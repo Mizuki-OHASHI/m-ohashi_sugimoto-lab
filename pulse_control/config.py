@@ -588,11 +588,11 @@ class PumpProbeConfig(BaseConfig):
 
         if self.pulse_width <= 0:
             errors.append("pulse_width must be positive")
-        if self.pulse_interval <= 0:
-            errors.append("pulse_interval must be positive")
+        if self.pulse_interval < 0:
+            errors.append("pulse_interval must be >= 0")
 
         # Pair must fit within one period
-        if self.frequency > 0 and self.pulse_width > 0 and self.pulse_interval > 0:
+        if self.frequency > 0 and self.pulse_width > 0 and self.pulse_interval >= 0:
             pair_total = 2 * self.pulse_width + self.pulse_interval
             if pair_total >= self.period:
                 errors.append(
@@ -719,10 +719,10 @@ class IntervalSweepConfig(BaseConfig):
 
         if self.pulse_width <= 0:
             errors.append("pulse_width must be positive")
-        if self.interval_start <= 0:
-            errors.append("interval_start must be positive")
-        if self.interval_stop <= 0:
-            errors.append("interval_stop must be positive")
+        if self.interval_start < 0:
+            errors.append("interval_start must be >= 0")
+        if self.interval_stop < 0:
+            errors.append("interval_stop must be >= 0")
         if self.interval_step <= 0:
             errors.append("interval_step must be positive")
 

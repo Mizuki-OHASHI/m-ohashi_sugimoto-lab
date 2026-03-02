@@ -445,8 +445,14 @@ def _pulse_stop(visa_addr: str, channel: int) -> None:
     st.session_state[f"ch{channel}_running"] = False
 
     # Auto-OFF live connection when all channels become idle
-    other = 2 if channel == 1 else 1
-    if not st.session_state.get(f"ch{other}_running"):
+    # Check both Simple Pulse and Pump-Probe running states
+    any_running = (
+        st.session_state.get("ch1_running")
+        or st.session_state.get("ch2_running")
+        or st.session_state.get("pp_ch1_running")
+        or st.session_state.get("pp_ch2_running")
+    )
+    if not any_running:
         if st.session_state.get("live_connection"):
             _close_live_connection()
             st.session_state._w_live_connection = False
@@ -672,26 +678,26 @@ with tab_pulse:
         c1, c2, c3 = st.columns(3)
         with c1:
             if ch1_running:
-                btn_ch1 = st.button("Stop CH1", use_container_width=True)
+                btn_ch1 = st.button("Stop CH1", type="primary", use_container_width=True)
             else:
                 btn_ch1 = st.button(
-                    "Start CH1", type="primary", use_container_width=True,
+                    "Start CH1", use_container_width=True,
                     disabled=not can_start,
                 )
         with c2:
             if ch2_running:
-                btn_ch2 = st.button("Stop CH2", use_container_width=True)
+                btn_ch2 = st.button("Stop CH2", type="primary", use_container_width=True)
             else:
                 btn_ch2 = st.button(
-                    "Start CH2", type="primary", use_container_width=True,
+                    "Start CH2", use_container_width=True,
                     disabled=not can_start,
                 )
         with c3:
             if is_live:
-                live_off = st.button("Live Off", use_container_width=True)
+                live_off = st.button("Live Off", type="primary", use_container_width=True)
             else:
                 live_on = st.button(
-                    "Live On", type="primary", use_container_width=True,
+                    "Live On", use_container_width=True,
                     disabled=not bool(visa_address),
                 )
 
@@ -896,26 +902,26 @@ with tab_pp:
         c1, c2, c3 = st.columns(3)
         with c1:
             if pp_ch1_running:
-                pp_btn_ch1 = st.button("Stop CH1", use_container_width=True, key="_pp_btn_ch1")
+                pp_btn_ch1 = st.button("Stop CH1", type="primary", use_container_width=True, key="_pp_btn_ch1")
             else:
                 pp_btn_ch1 = st.button(
-                    "Start CH1", type="primary", use_container_width=True,
+                    "Start CH1", use_container_width=True,
                     disabled=not can_start_pp, key="_pp_btn_ch1",
                 )
         with c2:
             if pp_ch2_running:
-                pp_btn_ch2 = st.button("Stop CH2", use_container_width=True, key="_pp_btn_ch2")
+                pp_btn_ch2 = st.button("Stop CH2", type="primary", use_container_width=True, key="_pp_btn_ch2")
             else:
                 pp_btn_ch2 = st.button(
-                    "Start CH2", type="primary", use_container_width=True,
+                    "Start CH2", use_container_width=True,
                     disabled=not can_start_pp, key="_pp_btn_ch2",
                 )
         with c3:
             if pp_is_live:
-                pp_live_off = st.button("Live Off", use_container_width=True, key="_pp_live_off")
+                pp_live_off = st.button("Live Off", type="primary", use_container_width=True, key="_pp_live_off")
             else:
                 pp_live_on = st.button(
-                    "Live On", type="primary", use_container_width=True,
+                    "Live On", use_container_width=True,
                     disabled=not bool(visa_address), key="_pp_live_on",
                 )
 
@@ -970,11 +976,11 @@ with tab_pp:
     # CH1 toggle (pump-probe)
     if pp_btn_ch1:
         if pp_ch1_running:
+            st.session_state.pp_ch1_running = False
             try:
                 _pulse_stop(visa_address, channel=1)
             except Exception as exc:
                 logger.error("Teardown CH1 error: %s", exc)
-            st.session_state.pp_ch1_running = False
             logger.info("Pump-probe CH1 stopped via UI")
             st.rerun()
         elif pp_config is not None:
@@ -990,11 +996,11 @@ with tab_pp:
     # CH2 toggle (pump-probe)
     if pp_btn_ch2:
         if pp_ch2_running:
+            st.session_state.pp_ch2_running = False
             try:
                 _pulse_stop(visa_address, channel=2)
             except Exception as exc:
                 logger.error("Teardown CH2 error: %s", exc)
-            st.session_state.pp_ch2_running = False
             logger.info("Pump-probe CH2 stopped via UI")
             st.rerun()
         elif pp_config is not None:
@@ -1014,6 +1020,9 @@ with tab_pp:
             st.session_state.live_instrument = inst
             st.session_state.live_connection = True
             delay_val = int(trigger_delay)
+            for ch_num in [1, 2]:
+                if st.session_state.get(f"pp_ch{ch_num}_running"):
+                    inst.set_trigger_delay(delay_val, channel=ch_num)
             st.session_state.last_trigger_delay = delay_val
             logger.info("Live connection opened (pump-probe tab)")
             st.rerun()
@@ -1025,6 +1034,24 @@ with tab_pp:
     if pp_live_off:
         _close_live_connection()
         st.rerun()
+
+    # Live trigger delay update (pump-probe tab)
+    if pp_is_live and not pp_live_off:
+        delay_val = int(trigger_delay)
+        prev_delay = st.session_state.get("last_trigger_delay")
+        if prev_delay is not None and delay_val != prev_delay:
+            inst = st.session_state.get("live_instrument")
+            if inst is not None:
+                try:
+                    for ch_num in [1, 2]:
+                        if st.session_state.get(f"pp_ch{ch_num}_running"):
+                            inst.set_trigger_delay(delay_val, channel=ch_num)
+                    st.session_state.last_trigger_delay = delay_val
+                    logger.info("Live (PP): trigger delay updated to %d", delay_val)
+                except Exception as exc:
+                    st.error(f"Failed to update trigger delay: {exc}")
+                    logger.exception("Live trigger delay update error (PP)")
+                    _close_live_connection()
 
 
 # ================================================================== #
