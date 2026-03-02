@@ -19,8 +19,14 @@ from typing import Callable
 
 import numpy as np
 
-from config import SweepConfig
-from core import PulseInstrument, _generate_widths, run_sweep
+from config import IntervalSweepConfig, SweepConfig
+from core import (
+    PulseInstrument,
+    _generate_intervals,
+    _generate_widths,
+    run_interval_sweep,
+    run_sweep,
+)
 from core_34401A import Multimeter
 
 logger = getLogger(__name__)
@@ -305,6 +311,95 @@ def run_integrated_sweep(
             logger.info("Sweep cycle %s complete.", label)
 
             # Set DC 0V during wait (no pulses between cycles)
+            for ch in channels:
+                instrument.set_between_cycles_dc_zero(channel=ch)
+
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user (Ctrl+C).")
+    finally:
+        for ch in channels:
+            instrument.teardown(channel=ch)
+        instrument.close()
+        dmm.close()
+        logger.info("All instruments closed.")
+
+
+def run_integrated_interval_sweep(
+    interval_config: IntervalSweepConfig,
+    integration_config: IntegrationConfig,
+    *,
+    channels: list[int] | None = None,
+    upload_callback: Callable[[int, int], None] | None = None,
+    sweep_callback: Callable[[int, int], None] | None = None,
+    ramp_callback: Callable[[float, str], None] | None = None,
+) -> None:
+    """Orchestrate voltage-triggered interval sweep cycles.
+
+    Same flow as run_integrated_sweep() but for pump-probe interval sweep.
+    """
+    channels = channels or [1]
+
+    instrument = PulseInstrument(interval_config.visa_address)
+    dmm = Multimeter(integration_config.dmm_visa_address)
+    dmm.configure_dc_voltage()
+
+    try:
+        # --- Phase 1: Upload waveforms (once) ---
+        intervals = _generate_intervals(
+            interval_config.interval_start,
+            interval_config.interval_stop,
+            interval_config.interval_step,
+            step_zones=interval_config.step_zones,
+        )
+        logger.info("Uploading %d pump-probe segments...", len(intervals))
+        for ch in channels:
+            instrument.setup_pump_probe_arbitrary(
+                interval_config,
+                interval_config.pulse_width,
+                intervals,
+                channel=ch,
+                callback=upload_callback,
+            )
+        logger.info("Waveform upload complete.")
+
+        # --- Phase 2: Cycle loop ---
+        cycle = 0
+        max_cycles = integration_config.num_cycles
+
+        while max_cycles == 0 or cycle < max_cycles:
+            cycle += 1
+            label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+            logger.info("=== Cycle %s ===", label)
+
+            prediction = detect_ramp_start(
+                dmm, integration_config, callback=ramp_callback,
+            )
+            logger.info(
+                "Ramp detected (slope=%.6f V/s, R²=%.6f, %d pts). "
+                "Waiting %.1f s before sweep...",
+                prediction.slope,
+                prediction.r_squared,
+                prediction.n_points,
+                max(0.0, prediction.sweep_start_time - time.time()),
+            )
+
+            now = time.time()
+            if prediction.sweep_start_time > now:
+                time.sleep(prediction.sweep_start_time - now)
+
+            if cycle > 1:
+                for ch in channels:
+                    instrument.restore_user_mode(interval_config, channel=ch)
+
+            logger.info("Starting interval sweep (cycle %s)...", label)
+            run_interval_sweep(
+                interval_config,
+                instrument,
+                callback=sweep_callback,
+                channels=channels,
+            )
+            logger.info("Interval sweep cycle %s complete.", label)
+
             for ch in channels:
                 instrument.set_between_cycles_dc_zero(channel=ch)
 

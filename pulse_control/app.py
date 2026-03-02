@@ -19,19 +19,30 @@ import streamlit as st
 from config import (
     DEFAULT_VISA_ADDRESS,
     DelaySweepConfig,
+    IntervalSweepConfig,
     PulseConfig,
+    PumpProbeConfig,
     SweepConfig,
     load_unified_toml,
     next_save_path,
     save_unified_toml,
 )
-from core import PulseInstrument, _calc_arb_params, _generate_widths, run_delay_sweep, run_sweep
+from core import (
+    PulseInstrument,
+    _calc_arb_params,
+    _generate_intervals,
+    _generate_widths,
+    run_delay_sweep,
+    run_interval_sweep,
+    run_sweep,
+)
 from core_34401A import DEFAULT_34401A_ADDRESS, Multimeter
 from core_integration import IntegrationConfig, detect_ramp_start
 from log_setup import setup_logging
 
 DEFAULT_CONFIG = Path("configs/config.toml")
 SAVED_RECORDS_CSV = Path("saved_pulse_records.csv")
+SAVED_PP_RECORDS_CSV = Path("saved_pump_probe_records.csv")
 
 setup_logging()
 logger = getLogger(__name__)
@@ -101,6 +112,31 @@ def _load_records_from_csv() -> list[dict]:
     return records
 
 
+def _save_pp_records_to_csv(records: list[dict]) -> None:
+    """Save pump-probe records to CSV on disk."""
+    with open(SAVED_PP_RECORDS_CSV, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "pulse_interval", "trigger_delay"])
+        for r in records:
+            writer.writerow([r["timestamp"], r["pulse_interval"], r["trigger_delay"]])
+
+
+def _load_pp_records_from_csv() -> list[dict]:
+    """Load pump-probe records from CSV if it exists."""
+    if not SAVED_PP_RECORDS_CSV.exists():
+        return []
+    records = []
+    with open(SAVED_PP_RECORDS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            records.append({
+                "timestamp": row["timestamp"],
+                "pulse_interval": row["pulse_interval"],
+                "trigger_delay": int(row["trigger_delay"]),
+            })
+    return records
+
+
 _CHANNEL_MAP = {"CH1": [1], "CH2": [2], "Both": [1, 2]}
 
 MAX_SAMPLE_RATE = 4.2e9  # 81180A maximum sample clock
@@ -149,6 +185,8 @@ _common = ucfg.get("common", {})
 _sp = ucfg.get("simple_pulse", {})
 _ws = ucfg.get("width_sweep", {})
 _ds = ucfg.get("delay_sweep", {})
+_pp = ucfg.get("pump_probe", {})
+_isw = ucfg.get("interval_sweep", {})
 _ig = ucfg.get("integration", {})
 
 
@@ -266,6 +304,51 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
     # waveform_mode is always "arbitrary" (square mode removed)
 
+    # Pump-Probe
+    pp = data.get("pump_probe", {})
+    st.session_state._w_pp_pulse_width = format_si(pp.get("pulse_width", 1e-8))
+    st.session_state._w_pp_pulse_interval = format_si(pp.get("pulse_interval", 2e-8))
+    # Restore saved_pp_records
+    _pp_saved = pp.get("saved_records") or data.get("interval_sweep", {}).get("delay_table")
+    if _pp_saved is not None:
+        st.session_state.saved_pp_records = [
+            {
+                "timestamp": "",
+                "pulse_interval": format_si(row[0]),
+                "trigger_delay": int(row[1]),
+            }
+            for row in _pp_saved
+        ]
+    elif not st.session_state.get("saved_pp_records"):
+        _pp_csv = _load_pp_records_from_csv()
+        if _pp_csv:
+            st.session_state.saved_pp_records = _pp_csv
+
+    # Interval Sweep
+    isw = data.get("interval_sweep", {})
+    st.session_state._w_interval_pulse_width = format_si(isw.get("pulse_width", 1e-8))
+    st.session_state._w_interval_start = format_si(isw.get("interval_start", 1e-8))
+    st.session_state._w_interval_stop = format_si(isw.get("interval_stop", 5e-8))
+    st.session_state._w_interval_step = format_si(isw.get("interval_step", 5e-9))
+    st.session_state._w_interval_wait_time = format_si(isw.get("wait_time", 1.0))
+    st.session_state._w_interval_settling_time = isw.get("settling_time", 0.0)
+    td_stop_isw = isw.get("trigger_delay_stop")
+    st.session_state._w_interval_trigger_delay_stop = (
+        td_stop_isw if td_stop_isw is not None else common.get("trigger_delay", 0)
+    )
+    st.session_state._w_interval_delay_exponent = isw.get("delay_exponent", 1.0)
+    _dm_isw = isw.get("delay_mode", "exponent")
+    st.session_state._w_interval_delay_mode_radio = "Exponent" if _dm_isw == "exponent" else "Table"
+    _isz = isw.get("step_zones", [])
+    st.session_state._w_interval_variable_step = bool(_isz)
+    if _isz:
+        z1 = _isz[0] if len(_isz) >= 1 else [None, None]
+        st.session_state._w_interval_step_zone1_boundary = format_si(z1[0]) if z1[0] is not None else ""
+        st.session_state._w_interval_step_zone1_step = format_si(z1[1]) if z1[1] is not None else ""
+        z2 = _isz[1] if len(_isz) >= 2 else [None, None]
+        st.session_state._w_interval_step_zone2_boundary = format_si(z2[0]) if z2[0] is not None else ""
+        st.session_state._w_interval_step_zone2_step = format_si(z2[1]) if z2[1] is not None else ""
+
 
 # Process pending import BEFORE any widgets are instantiated
 if "_pending_import" in st.session_state:
@@ -302,6 +385,33 @@ def _pulse_start(config: PulseConfig, channel: int) -> None:
 
     try:
         inst.setup_arbitrary(config, [config.pulse_width], channel=channel)
+    except Exception:
+        if close_after:
+            inst.close()
+        raise
+
+    if close_after:
+        inst.close()
+    else:
+        st.session_state.last_trigger_delay = config.trigger_delay
+
+
+def _pump_probe_start(config: PumpProbeConfig, channel: int) -> None:
+    """Start pump-probe output. Same live-connection pattern as _pulse_start."""
+    if st.session_state.get("live_connection"):
+        inst = st.session_state.get("live_instrument")
+        if inst is None:
+            inst = PulseInstrument(config.visa_address)
+            st.session_state.live_instrument = inst
+        close_after = False
+    else:
+        inst = PulseInstrument(config.visa_address)
+        close_after = True
+
+    try:
+        inst.setup_pump_probe_arbitrary(
+            config, config.pulse_width, [config.pulse_interval], channel=channel,
+        )
     except Exception:
         if close_after:
             inst.close()
@@ -495,7 +605,9 @@ pulse_config: PulseConfig | None = None
 sweep_config_built: SweepConfig | None = None
 delay_config_built: DelaySweepConfig | None = None
 
-tab_pulse, tab_sweep, tab_delay = st.tabs(["Simple Pulse", "Width Sweep", "Delay Sweep"])
+tab_pulse, tab_pp, tab_sweep, tab_isweep, tab_delay = st.tabs([
+    "Simple Pulse", "Pump-Probe", "Width Sweep", "Interval Sweep", "Delay Sweep",
+])
 
 # ================================================================== #
 #  Simple Pulse tab
@@ -710,6 +822,209 @@ with tab_pulse:
                     st.error(f"Failed to update trigger delay: {exc}")
                     logger.exception("Live trigger delay update error")
                     _close_live_connection()
+
+
+# ================================================================== #
+#  Pump-Probe tab
+# ================================================================== #
+with tab_pp:
+    _pp_left, _pp_right = st.columns([2, 1])
+
+    with _pp_left:
+        st.text_input(
+            "Pulse Width [s]",
+            value=format_si(_pp.get("pulse_width", 1e-8)),
+            key="_w_pp_pulse_width",
+        )
+        st.text_input(
+            "Pulse Interval [s]",
+            value=format_si(_pp.get("pulse_interval", 2e-8)),
+            key="_w_pp_pulse_interval",
+        )
+
+        # Parse pump-probe specific fields
+        pp_parse_errors = list(common_parse_errors)
+        pp_pulse_width_val: float | None = None
+        pp_pulse_interval_val: float | None = None
+        try:
+            pp_pulse_width_val = parse_si(st.session_state._w_pp_pulse_width)
+        except (ValueError, KeyError):
+            pp_parse_errors.append(
+                f"pulse_width: invalid value \"{st.session_state.get('_w_pp_pulse_width', '')}\""
+            )
+        try:
+            pp_pulse_interval_val = parse_si(st.session_state._w_pp_pulse_interval)
+        except (ValueError, KeyError):
+            pp_parse_errors.append(
+                f"pulse_interval: invalid value \"{st.session_state.get('_w_pp_pulse_interval', '')}\""
+            )
+
+        pp_config: PumpProbeConfig | None = None
+        if not pp_parse_errors and pp_pulse_width_val is not None and pp_pulse_interval_val is not None:
+            pp_config = PumpProbeConfig(
+                visa_address=visa_address,
+                v_on=v_on,
+                v_off=v_off,
+                frequency=common_parsed["frequency"],
+                trigger_delay=int(trigger_delay),
+                resolution_n=int(resolution_n),
+                pulse_width=pp_pulse_width_val,
+                pulse_interval=pp_pulse_interval_val,
+            )
+
+        errors_pp = list(pp_parse_errors)
+        if pp_config is not None:
+            errors_pp.extend(pp_config.validate())
+
+        if errors_pp:
+            st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_pp))
+        else:
+            st.success("Parameters OK")
+            if pp_config is not None:
+                _show_arb_info(
+                    pp_config.frequency, [pp_config.pulse_width],
+                    resolution_n=resolution_n,
+                )
+
+        can_start_pp = not bool(errors_pp) and bool(visa_address) and pp_config is not None
+        pp_ch1_running = st.session_state.get("pp_ch1_running", False)
+        pp_ch2_running = st.session_state.get("pp_ch2_running", False)
+        pp_is_live = st.session_state.get("live_connection", False)
+        pp_live_on = False
+        pp_live_off = False
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if pp_ch1_running:
+                pp_btn_ch1 = st.button("Stop CH1", use_container_width=True, key="_pp_btn_ch1")
+            else:
+                pp_btn_ch1 = st.button(
+                    "Start CH1", type="primary", use_container_width=True,
+                    disabled=not can_start_pp, key="_pp_btn_ch1",
+                )
+        with c2:
+            if pp_ch2_running:
+                pp_btn_ch2 = st.button("Stop CH2", use_container_width=True, key="_pp_btn_ch2")
+            else:
+                pp_btn_ch2 = st.button(
+                    "Start CH2", type="primary", use_container_width=True,
+                    disabled=not can_start_pp, key="_pp_btn_ch2",
+                )
+        with c3:
+            if pp_is_live:
+                pp_live_off = st.button("Live Off", use_container_width=True, key="_pp_live_off")
+            else:
+                pp_live_on = st.button(
+                    "Live On", type="primary", use_container_width=True,
+                    disabled=not bool(visa_address), key="_pp_live_on",
+                )
+
+        if st.session_state.get("live_connection"):
+            st.warning("Live Connection: ON (front panel locked in REMOTE mode)")
+        if pp_ch1_running:
+            st.info("CH1: Pump-probe output is ON.")
+        if pp_ch2_running:
+            st.info("CH2: Pump-probe output is ON.")
+
+    with _pp_right:
+        if "saved_pp_records" not in st.session_state:
+            st.session_state.saved_pp_records = []
+
+        _pp_sv1, _pp_sv2 = st.columns(2)
+        with _pp_sv1:
+            _pp_btn_save = st.button("Save", type="primary", use_container_width=True, key="_pp_save")
+        with _pp_sv2:
+            _pp_btn_clear = st.button("Clear", use_container_width=True, key="_pp_clear")
+
+        if _pp_btn_save:
+            iv = st.session_state.get("_w_pp_pulse_interval", "")
+            new_record = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "pulse_interval": iv,
+                "trigger_delay": int(trigger_delay),
+            }
+            records = st.session_state.saved_pp_records
+            replaced = False
+            for i, r in enumerate(records):
+                if r["pulse_interval"] == iv:
+                    records[i] = new_record
+                    replaced = True
+                    break
+            if not replaced:
+                records.append(new_record)
+            records.sort(key=lambda r: parse_si(r["pulse_interval"]))
+            _save_pp_records_to_csv(records)
+            st.rerun()
+
+        if _pp_btn_clear:
+            st.session_state.saved_pp_records = []
+            _save_pp_records_to_csv([])
+            st.rerun()
+
+        if st.session_state.saved_pp_records:
+            lines = ["timestamp,pulse_interval,trigger_delay"]
+            for r in st.session_state.saved_pp_records:
+                lines.append(f"{r['timestamp']},{r['pulse_interval']},{r['trigger_delay']}")
+            st.markdown("```csv\n" + "\n".join(lines) + "\n```")
+
+    # CH1 toggle (pump-probe)
+    if pp_btn_ch1:
+        if pp_ch1_running:
+            try:
+                _pulse_stop(visa_address, channel=1)
+            except Exception as exc:
+                logger.error("Teardown CH1 error: %s", exc)
+            st.session_state.pp_ch1_running = False
+            logger.info("Pump-probe CH1 stopped via UI")
+            st.rerun()
+        elif pp_config is not None:
+            try:
+                _pump_probe_start(pp_config, channel=1)
+                st.session_state.pp_ch1_running = True
+                logger.info("Pump-probe CH1 started via UI")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                logger.exception("Error starting pump-probe CH1")
+
+    # CH2 toggle (pump-probe)
+    if pp_btn_ch2:
+        if pp_ch2_running:
+            try:
+                _pulse_stop(visa_address, channel=2)
+            except Exception as exc:
+                logger.error("Teardown CH2 error: %s", exc)
+            st.session_state.pp_ch2_running = False
+            logger.info("Pump-probe CH2 stopped via UI")
+            st.rerun()
+        elif pp_config is not None:
+            try:
+                _pump_probe_start(pp_config, channel=2)
+                st.session_state.pp_ch2_running = True
+                logger.info("Pump-probe CH2 started via UI")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                logger.exception("Error starting pump-probe CH2")
+
+    # Live connection (pump-probe tab)
+    if pp_live_on:
+        try:
+            inst = PulseInstrument(visa_address)
+            st.session_state.live_instrument = inst
+            st.session_state.live_connection = True
+            delay_val = int(trigger_delay)
+            st.session_state.last_trigger_delay = delay_val
+            logger.info("Live connection opened (pump-probe tab)")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Live connection failed: {exc}")
+            st.session_state.live_connection = False
+            logger.exception("Live connection error")
+
+    if pp_live_off:
+        _close_live_connection()
+        st.rerun()
 
 
 # ================================================================== #
@@ -1272,6 +1587,496 @@ with tab_sweep:
 
 
 # ================================================================== #
+#  Interval Sweep tab (pump-probe mode)
+# ================================================================== #
+with tab_isweep:
+    is_col_range, is_col_timing, is_col_opts = st.columns(3)
+
+    with is_col_range:
+        st.text_input(
+            "Pulse Width [s] (fixed)",
+            value=format_si(_isw.get("pulse_width", 1e-8)),
+            key="_w_interval_pulse_width",
+        )
+        st.text_input(
+            "Interval Start [s]",
+            value=format_si(_isw.get("interval_start", 1e-8)),
+            key="_w_interval_start",
+        )
+        st.text_input(
+            "Interval Stop [s]",
+            value=format_si(_isw.get("interval_stop", 5e-8)),
+            key="_w_interval_stop",
+        )
+        st.text_input(
+            "Interval Step [s]",
+            value=format_si(_isw.get("interval_step", 5e-9)),
+            key="_w_interval_step",
+        )
+
+        # Variable step zones
+        _is_var_step = st.checkbox(
+            "Variable step zones", key="_w_interval_variable_step",
+        )
+        _is_step_zones: list[tuple[float, float]] | None = None
+        if _is_var_step:
+            _isz1_b = st.text_input("Zone 1 boundary [s]", key="_w_interval_step_zone1_boundary")
+            _isz1_s = st.text_input("Zone 1 step [s]", key="_w_interval_step_zone1_step")
+            _isz2_b = st.text_input("Zone 2 boundary [s]", key="_w_interval_step_zone2_boundary")
+            _isz2_s = st.text_input("Zone 2 step [s]", key="_w_interval_step_zone2_step")
+
+            _is_step_zones = []
+            for b_str, s_str in [(_isz1_b, _isz1_s), (_isz2_b, _isz2_s)]:
+                if b_str and s_str:
+                    try:
+                        _is_step_zones.append((parse_si(b_str), parse_si(s_str)))
+                    except ValueError:
+                        pass
+            if not _is_step_zones:
+                _is_step_zones = None
+
+    with is_col_timing:
+        st.text_input(
+            "Wait Time [s]",
+            value=format_si(_isw.get("wait_time", 1.0)),
+            key="_w_interval_wait_time",
+        )
+        is_settling_time = st.number_input(
+            "Settling Time [s]",
+            value=_isw.get("settling_time", 0.0), min_value=0.0, step=1.0, format="%.1f",
+            help="Wait time before sweep starts",
+            key="_w_interval_settling_time",
+        )
+        is_channel = st.radio(
+            "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_isweep_ch",
+        )
+
+    with is_col_opts:
+        is_delay_mode = st.radio(
+            "Delay Mode", ["Exponent", "Table"], key="_w_interval_delay_mode_radio",
+        )
+        _is_delay_mode_val = "exponent" if is_delay_mode == "Exponent" else "table"
+        is_delay_exponent = 1.0
+        _is_delay_stop_val = int(trigger_delay)
+
+        if _is_delay_mode_val == "exponent":
+            _is_delay_stop_val = st.number_input(
+                "Trigger Delay Stop [points] (×8)",
+                value=_isw.get("trigger_delay_stop", int(trigger_delay)),
+                min_value=0, step=8,
+                key="_w_interval_trigger_delay_stop",
+            )
+            is_delay_exponent = st.number_input(
+                "Delay Exponent",
+                value=_isw.get("delay_exponent", 1.0),
+                min_value=-4.0, max_value=4.0, step=0.25, format="%.2f",
+                help="delay = a × interval^n + b (1=linear, -1=1/interval)",
+                key="_w_interval_delay_exponent",
+            )
+        else:
+            _pp_records = st.session_state.get("saved_pp_records", [])
+            if len(_pp_records) < 2:
+                st.warning("Table mode requires ≥ 2 saved pump-probe records.")
+            else:
+                with st.expander("Delay Lookup Table"):
+                    import pandas as pd
+                    _tbl_data = [
+                        {"Pulse Interval [s]": r["pulse_interval"], "Trigger Delay [pts]": r["trigger_delay"]}
+                        for r in _pp_records
+                    ]
+                    st.dataframe(pd.DataFrame(_tbl_data), hide_index=True)
+
+    # Parse interval sweep fields
+    is_parse_errors = list(common_parse_errors)
+    is_parsed = dict(common_parsed)
+
+    for name, key in [
+        ("pulse_width", "_w_interval_pulse_width"),
+        ("interval_start", "_w_interval_start"),
+        ("interval_stop", "_w_interval_stop"),
+        ("interval_step", "_w_interval_step"),
+        ("wait_time", "_w_interval_wait_time"),
+    ]:
+        try:
+            is_parsed[name] = parse_si(st.session_state.get(key, ""))
+        except (ValueError, KeyError):
+            is_parse_errors.append(
+                f"{name}: invalid value \"{st.session_state.get(key, '')}\""
+            )
+
+    # Build delay_table for interval sweep
+    _is_delay_table: list[tuple[float, int]] | None = None
+    if _is_delay_mode_val == "table":
+        _pp_recs = st.session_state.get("saved_pp_records", [])
+        if _pp_recs:
+            _is_delay_table = [
+                (parse_si(r["pulse_interval"]), int(r["trigger_delay"]))
+                for r in _pp_recs
+            ]
+
+    # Build config
+    interval_config_built: IntervalSweepConfig | None = None
+    if not is_parse_errors:
+        interval_config_built = IntervalSweepConfig(
+            visa_address=visa_address,
+            v_on=v_on,
+            v_off=v_off,
+            frequency=is_parsed["frequency"],
+            trigger_delay=int(trigger_delay),
+            resolution_n=int(resolution_n),
+            pulse_width=is_parsed["pulse_width"],
+            interval_start=is_parsed["interval_start"],
+            interval_stop=is_parsed["interval_stop"],
+            interval_step=is_parsed["interval_step"],
+            wait_time=is_parsed["wait_time"],
+            settling_time=is_settling_time,
+            trigger_delay_stop=_is_delay_stop_val if _is_delay_stop_val != int(trigger_delay) else None,
+            delay_exponent=is_delay_exponent,
+            delay_mode=_is_delay_mode_val,
+            delay_table=_is_delay_table,
+            step_zones=_is_step_zones,
+        )
+
+    # Validation
+    errors_isweep = list(is_parse_errors)
+    if interval_config_built is not None:
+        errors_isweep.extend(interval_config_built.validate())
+
+    if errors_isweep:
+        st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_isweep))
+    else:
+        st.success("Parameters OK")
+        if interval_config_built is not None:
+            intervals_preview = _generate_intervals(
+                interval_config_built.interval_start,
+                interval_config_built.interval_stop,
+                interval_config_built.interval_step,
+                step_zones=interval_config_built.step_zones,
+            )
+            try:
+                _is_sr, _is_pts = _calc_arb_params(
+                    interval_config_built.frequency,
+                    [interval_config_built.pulse_width],
+                    intervals=intervals_preview,
+                    resolution_n=resolution_n,
+                )
+                _is_tpp = 1.0 / interval_config_built.frequency / _is_pts
+                with st.expander("Arbitrary Waveform Details"):
+                    st.json({
+                        "segments": len(intervals_preview),
+                        "points_per_period": _is_pts,
+                        "sample_rate": f"{_is_sr:.3e} Sa/s",
+                        "time_per_point": f"{format_si(_is_tpp)}s",
+                        "delay_resolution (×8)": f"{format_si(8 * _is_tpp)}s",
+                        "total_memory": f"{len(intervals_preview) * _is_pts:,} words",
+                    })
+            except Exception:
+                pass
+
+    # Run interval sweep
+    if st.button("Start Interval Sweep", disabled=bool(errors_isweep) or not visa_address,
+                  type="primary", key="_btn_start_interval_sweep"):
+        config = interval_config_built
+        channels = _CHANNEL_MAP[is_channel]
+        logger.info("Interval sweep started (channels=%s)", channels)
+        progress = st.progress(0, text="Connecting...")
+
+        instrument = None
+        try:
+            instrument = PulseInstrument(config.visa_address)
+            progress.progress(0, text="Setting up instrument...")
+
+            intervals_list = _generate_intervals(
+                config.interval_start, config.interval_stop, config.interval_step,
+                step_zones=config.step_zones,
+            )
+
+            def on_is_upload(i: int, total: int) -> None:
+                progress.progress(
+                    (i + 1) / total,
+                    text=f"Uploading segments... [{i + 1}/{total}]",
+                )
+
+            for ch in channels:
+                instrument.setup_pump_probe_arbitrary(
+                    config, config.pulse_width, intervals_list,
+                    channel=ch, callback=on_is_upload,
+                )
+
+            # Settling phase
+            if config.settling_time > 0:
+                t0 = time.time()
+                while (elapsed := time.time() - t0) < config.settling_time:
+                    pct = elapsed / config.settling_time
+                    progress.progress(
+                        pct,
+                        text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                    )
+                    time.sleep(0.2)
+
+            sweep_start = time.time()
+
+            def on_is_step(i: int, total: int) -> None:
+                pct = (i + 1) / total
+                elapsed = time.time() - sweep_start
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                remaining = (total - i - 1) / rate if rate > 0 else 0
+                progress.progress(
+                    pct,
+                    text=(
+                        f"Sweeping... {i + 1}/{total}"
+                        f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                    ),
+                )
+
+            run_interval_sweep(config, instrument, callback=on_is_step, channels=channels)
+
+            for ch in channels:
+                instrument.teardown(channel=ch)
+
+            progress.progress(1.0, text="Done!")
+            logger.info("Interval sweep completed")
+
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+            logger.exception("Error during interval sweep")
+        finally:
+            if instrument is not None:
+                instrument.close()
+
+    # ============================================================ #
+    #  Auto Sweep (Voltage-Triggered) for Interval Sweep
+    # ============================================================ #
+    st.divider()
+    st.text("Auto Sweep (Voltage-Triggered)")
+
+    is_ig_mode_col, is_ig_common_col = st.columns([1, 2])
+
+    with is_ig_mode_col:
+        with st.expander(f"DMM Settings ({_ig.get('dmm_visa_address', DEFAULT_34401A_ADDRESS)})", expanded=False):
+            st.text_input(
+                "DMM VISA Address",
+                value=_ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS),
+                key="_w_is_ig_dmm_address",
+            )
+
+    with is_ig_common_col:
+        _isc1, _isc2 = st.columns(2)
+        with _isc1:
+            is_ig_poll = st.number_input(
+                "Poll Interval [s]",
+                value=_ig.get("poll_interval", 1.0),
+                min_value=0.1, step=0.5, format="%.1f",
+                key="_w_is_ig_poll_interval",
+            )
+        with _isc2:
+            is_ig_cycles = st.number_input(
+                "Cycles (0 = infinite)",
+                value=_ig.get("num_cycles", 0),
+                min_value=0, step=1,
+                key="_w_is_ig_num_cycles",
+            )
+
+    _isr1, _isr2, _isr3 = st.columns(3)
+    with _isr1:
+        is_ig_trig_start = st.number_input(
+            "Trigger Start [V]",
+            value=_ig.get("trigger_start_voltage", -9.8),
+            format="%.2f",
+            key="_w_is_ig_trigger_start",
+        )
+    with _isr2:
+        is_ig_trig_end = st.number_input(
+            "Trigger End [V]",
+            value=_ig.get("trigger_end_voltage", -9.2),
+            format="%.2f",
+            key="_w_is_ig_trigger_end",
+        )
+    with _isr3:
+        is_ig_sweep_start = st.number_input(
+            "Sweep Start [V]",
+            value=_ig.get("sweep_start_voltage", -9.0),
+            format="%.2f",
+            key="_w_is_ig_sweep_start",
+        )
+
+    is_ig_config: IntegrationConfig | None = None
+    is_ig_errors: list[str] = []
+
+    if not errors_isweep and interval_config_built is not None:
+        is_ig_config = IntegrationConfig(
+            dmm_visa_address=st.session_state.get("_w_is_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+            trigger_start_voltage=float(is_ig_trig_start),
+            trigger_end_voltage=float(is_ig_trig_end),
+            sweep_start_voltage=float(is_ig_sweep_start),
+            poll_interval=float(is_ig_poll),
+            num_cycles=int(is_ig_cycles),
+        )
+        is_ig_errors = is_ig_config.validate()
+
+    if is_ig_errors:
+        st.error("Integration config error:\n" + "\n".join(f"- {e}" for e in is_ig_errors))
+
+    can_start_auto_is = (
+        not bool(errors_isweep)
+        and not bool(is_ig_errors)
+        and bool(visa_address)
+        and interval_config_built is not None
+        and is_ig_config is not None
+    )
+
+    if is_ig_cycles == 0:
+        st.caption("Cycles=0: runs until page is refreshed.")
+
+    if st.button(
+        "Start Auto Interval Sweep",
+        disabled=not can_start_auto_is,
+        type="primary",
+        key="_btn_start_auto_interval_sweep",
+    ):
+        config = interval_config_built
+        integration = is_ig_config
+        channels = _CHANNEL_MAP[is_channel]
+        logger.info("Auto interval sweep started (channels=%s, cycles=%s)", channels, integration.num_cycles)
+
+        cycle_status = st.empty()
+        phase_status = st.empty()
+        voltage_display = st.empty()
+        progress = st.progress(0)
+
+        instrument = None
+        dmm = None
+        try:
+            phase_status.info("Connecting to AWG...")
+            instrument = PulseInstrument(config.visa_address)
+
+            phase_status.info("Connecting to DMM...")
+            dmm = Multimeter(integration.dmm_visa_address)
+            dmm.configure_dc_voltage()
+
+            intervals_list = _generate_intervals(
+                config.interval_start, config.interval_stop, config.interval_step,
+                step_zones=config.step_zones,
+            )
+
+            def on_auto_is_upload(i: int, total: int) -> None:
+                progress.progress(
+                    (i + 1) / total,
+                    text=f"Uploading segments... [{i + 1}/{total}]",
+                )
+
+            for ch in channels:
+                instrument.setup_pump_probe_arbitrary(
+                    config, config.pulse_width, intervals_list,
+                    channel=ch, callback=on_auto_is_upload,
+                )
+
+            if config.settling_time > 0:
+                phase_status.info("Settling...")
+                t0 = time.time()
+                while (elapsed := time.time() - t0) < config.settling_time:
+                    pct = elapsed / config.settling_time
+                    progress.progress(
+                        pct,
+                        text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                    )
+                    time.sleep(0.2)
+
+            max_cycles = integration.num_cycles
+            cycle = 0
+
+            while max_cycles == 0 or cycle < max_cycles:
+                cycle += 1
+                label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+                cycle_status.markdown(f"**Cycle {label}**")
+
+                phase_status.info("Waiting for ramp...")
+                progress.progress(0, text="Monitoring voltage...")
+
+                def on_is_ramp(voltage: float, phase: str) -> None:
+                    if phase == "waiting_low":
+                        voltage_display.metric(
+                            "DMM Voltage", f"{voltage:.4f} V",
+                            delta="waiting for low voltage",
+                        )
+                    elif phase == "waiting_trigger":
+                        voltage_display.metric(
+                            "DMM Voltage", f"{voltage:.4f} V",
+                            delta="waiting for ramp start",
+                        )
+                    else:
+                        voltage_display.metric(
+                            "DMM Voltage", f"{voltage:.4f} V",
+                            delta="collecting fit data",
+                        )
+                        phase_status.info("Collecting ramp data for linear fit...")
+
+                prediction = detect_ramp_start(dmm, integration, callback=on_is_ramp)
+
+                voltage_display.empty()
+                phase_status.info(
+                    f"Fit: slope={prediction.slope:.4f} V/s, "
+                    f"R\u00b2={prediction.r_squared:.4f}, "
+                    f"n={prediction.n_points} pts"
+                )
+
+                now = time.time()
+                wait_seconds = max(0.0, prediction.sweep_start_time - now)
+                if wait_seconds > 0:
+                    t0 = time.time()
+                    while (elapsed := time.time() - t0) < wait_seconds:
+                        pct = elapsed / wait_seconds
+                        remaining = wait_seconds - elapsed
+                        progress.progress(pct, text=f"Sweep starts in {remaining:.1f}s")
+                        time.sleep(0.2)
+
+                if cycle > 1:
+                    for ch in channels:
+                        instrument.restore_user_mode(config, channel=ch)
+
+                phase_status.info(f"Sweeping (cycle {label})...")
+                voltage_display.empty()
+                sweep_start = time.time()
+
+                def on_auto_is_step(i: int, total: int) -> None:
+                    pct = (i + 1) / total
+                    elapsed = time.time() - sweep_start
+                    rate = (i + 1) / elapsed if elapsed > 0 else 0
+                    remaining = (total - i - 1) / rate if rate > 0 else 0
+                    progress.progress(
+                        pct,
+                        text=(
+                            f"Sweeping... {i + 1}/{total}"
+                            f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                        ),
+                    )
+
+                run_interval_sweep(config, instrument, callback=on_auto_is_step, channels=channels)
+                logger.info("Auto interval sweep cycle %s complete", label)
+
+                for ch in channels:
+                    instrument.set_between_cycles_dc_zero(channel=ch)
+                phase_status.info("Waiting (0V output)...")
+
+            for ch in channels:
+                instrument.teardown(channel=ch)
+            cycle_status.success(f"Auto interval sweep complete ({cycle} cycle(s))")
+            phase_status.empty()
+            voltage_display.empty()
+            progress.progress(1.0, text="Done!")
+            logger.info("Auto interval sweep finished (%d cycles)", cycle)
+
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+            logger.exception("Error during auto interval sweep")
+        finally:
+            if instrument is not None:
+                instrument.close()
+            if dmm is not None:
+                dmm.close()
+
+
+# ================================================================== #
 #  Delay Sweep tab
 # ================================================================== #
 with tab_delay:
@@ -1502,6 +2307,61 @@ def _build_toml_data() -> dict:
     ds_data["delay_step"] = int(st.session_state.get("_w_delay_step", 8))
     ds_data["settling_time"] = float(st.session_state.get("_w_delay_settling_time", 0.0))
     data["delay_sweep"] = ds_data
+
+    # Pump-Probe section
+    pp_data: dict = {}
+    try:
+        pp_data["pulse_width"] = parse_si(st.session_state.get("_w_pp_pulse_width", "10n"))
+    except ValueError:
+        pp_data["pulse_width"] = 1e-8
+    try:
+        pp_data["pulse_interval"] = parse_si(st.session_state.get("_w_pp_pulse_interval", "20n"))
+    except ValueError:
+        pp_data["pulse_interval"] = 2e-8
+    if st.session_state.get("saved_pp_records"):
+        pp_data["saved_records"] = [
+            [parse_si(r["pulse_interval"]), float(r["trigger_delay"])]
+            for r in st.session_state.get("saved_pp_records", [])
+        ]
+    data["pump_probe"] = pp_data
+
+    # Interval Sweep section
+    isw_data: dict = {}
+    try:
+        isw_data["pulse_width"] = parse_si(st.session_state.get("_w_interval_pulse_width", "10n"))
+    except ValueError:
+        isw_data["pulse_width"] = 1e-8
+    for name, key in [
+        ("interval_start", "_w_interval_start"),
+        ("interval_stop", "_w_interval_stop"),
+        ("interval_step", "_w_interval_step"),
+        ("wait_time", "_w_interval_wait_time"),
+    ]:
+        try:
+            isw_data[name] = parse_si(st.session_state.get(key, ""))
+        except ValueError:
+            pass
+    isw_data["settling_time"] = float(st.session_state.get("_w_interval_settling_time", 0.0))
+    _is_tds = int(st.session_state.get("_w_interval_trigger_delay_stop", 0))
+    if _is_tds != int(trigger_delay):
+        isw_data["trigger_delay_stop"] = _is_tds
+    _is_de = float(st.session_state.get("_w_interval_delay_exponent", 1.0))
+    if _is_de != 1.0:
+        isw_data["delay_exponent"] = _is_de
+    _is_dm = st.session_state.get("_w_interval_delay_mode_radio", "Exponent")
+    _is_dm_val = "exponent" if _is_dm == "Exponent" else "table"
+    if _is_dm_val != "exponent":
+        isw_data["delay_mode"] = _is_dm_val
+    if _is_dm_val == "table":
+        _pp_recs = st.session_state.get("saved_pp_records", [])
+        if _pp_recs:
+            isw_data["delay_table"] = [
+                [parse_si(r["pulse_interval"]), float(r["trigger_delay"])]
+                for r in _pp_recs
+            ]
+    if _is_step_zones:
+        isw_data["step_zones"] = [list(row) for row in _is_step_zones]
+    data["interval_sweep"] = isw_data
 
     # Integration (Auto Sweep)
     data["integration"] = {

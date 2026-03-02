@@ -10,18 +10,20 @@ from typing import Callable
 import numpy as np
 import pyvisa
 
-from config import BaseConfig, DelaySweepConfig, SweepConfig
+from config import BaseConfig, DelaySweepConfig, IntervalSweepConfig, SweepConfig
 
 logger = getLogger(__name__)
 
 
 def _calc_arb_params(
-    frequency: float, widths: list[float], *, resolution_n: int = 1,
+    frequency: float, widths: list[float], *,
+    intervals: list[float] | None = None,
+    resolution_n: int = 1,
 ) -> tuple[float, int]:
     """Compute optimal sample rate and points-per-period for arbitrary mode.
 
     Algorithm:
-    1. Compute GCD of period and all widths at picosecond precision.
+    1. Compute GCD of period, all widths, and all intervals at picosecond precision.
     2. Divide GCD by K to get time_per_point.
     3. Increase K until points_per_period >= 320 and is a multiple of 32.
        (81180A: min segment = 320 points, increment = 32 points)
@@ -36,6 +38,9 @@ def _calc_arb_params(
     g = ps_period
     for pw in ps_widths:
         g = math.gcd(g, pw)
+    if intervals:
+        for pi in [round(iv * 1e12) for iv in intervals]:
+            g = math.gcd(g, pi)
     if g == 0:
         raise ValueError("GCD is zero – check frequency and widths")
 
@@ -83,6 +88,51 @@ def _generate_pulse_waveform(
     else:
         waveform = np.zeros(points_per_period, dtype=np.uint16)
         waveform[start:start + on_points] = 4095
+    return waveform
+
+
+def _generate_pump_probe_waveform(
+    points_per_period: int,
+    pulse_width: float,
+    pulse_interval: float,
+    frequency: float,
+    *,
+    inverted: bool = False,
+) -> np.ndarray:
+    """Generate one period of pump-probe (double-pulse) waveform as DAC values.
+
+    Layout (pair centered within the period)::
+
+        |<--- period = 1/freq --->|
+        ___|^|__interval__|^|___
+           pw     gap      pw
+
+    Parameters
+    ----------
+    points_per_period : int
+    pulse_width : float  [s]
+    pulse_interval : float  [s]  gap between the two pulses
+    frequency : float  [Hz]
+    inverted : bool
+    """
+    period = 1.0 / frequency
+    time_per_point = period / points_per_period
+    pw_points = round(pulse_width / time_per_point)
+    interval_points = round(pulse_interval / time_per_point)
+    pair_points = 2 * pw_points + interval_points
+    left_pad = (points_per_period - pair_points) // 2
+
+    if inverted:
+        waveform = np.full(points_per_period, 4095, dtype=np.uint16)
+        waveform[left_pad:left_pad + pw_points] = 0
+        p2_start = left_pad + pw_points + interval_points
+        waveform[p2_start:p2_start + pw_points] = 0
+    else:
+        waveform = np.zeros(points_per_period, dtype=np.uint16)
+        waveform[left_pad:left_pad + pw_points] = 4095
+        p2_start = left_pad + pw_points + interval_points
+        waveform[p2_start:p2_start + pw_points] = 4095
+
     return waveform
 
 
@@ -249,6 +299,66 @@ class PulseInstrument:
         w(":OUTPut ON")
         self._query("*OPC?")
         logger.info("Arbitrary waveform setup complete")
+
+    def setup_pump_probe_arbitrary(
+        self,
+        config: BaseConfig,
+        pulse_width: float,
+        intervals: list[float],
+        *,
+        channel: int = 1,
+        callback: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Arbitrary Waveform mode for pump-probe: upload segments with varying intervals."""
+        logger.info(
+            "Starting pump-probe arbitrary setup (%d segments, CH%d)",
+            len(intervals), channel,
+        )
+        w = self._write
+
+        w(f":INST CH{channel}")
+        w(":FUNC:MODE USER")
+        w(":TRAC:DEL:ALL")
+
+        sample_rate, points_per_period = _calc_arb_params(
+            config.frequency, [pulse_width],
+            intervals=intervals,
+            resolution_n=config.resolution_n,
+        )
+        logger.info(
+            "ARB params: sample_rate=%.3e Sa/s, points_per_period=%d",
+            sample_rate, points_per_period,
+        )
+        w(f":FREQ:RAST {sample_rate}")
+
+        inverted = config.v_on < config.v_off
+        for i, interval in enumerate(intervals):
+            seg = i + 1
+            waveform = _generate_pump_probe_waveform(
+                points_per_period, pulse_width, interval, config.frequency,
+                inverted=inverted,
+            )
+            w(f":TRACe:DEF {seg}, {points_per_period}")
+            w(f":TRACe:SEL {seg}")
+            self.instr.write_binary_values(":TRACe:DATA", waveform, datatype="H")
+            self._query("*OPC?")
+            logger.debug(
+                "Uploaded segment %d: interval=%.4e s, %d points",
+                seg, interval, points_per_period,
+            )
+            if callback is not None:
+                callback(i, len(intervals))
+
+        w(":TRACe:SEL 1")
+        ampl = abs(config.v_on - config.v_off) / 2
+        offs = (config.v_on + config.v_off) / 4
+        w(f":VOLT:AMPLitude {ampl}")
+        w(f":VOLT:OFFSet {offs}")
+
+        w(f":TRIGger:DELay {config.trigger_delay}")
+        w(":OUTPut ON")
+        self._query("*OPC?")
+        logger.info("Pump-probe arbitrary setup complete")
 
     def select_segment(self, index: int, *, channel: int = 1) -> None:
         """Switch to a pre-uploaded segment (for arbitrary mode sweep)."""
@@ -499,4 +609,85 @@ def run_delay_sweep(
             callback(i, total)
 
     # Final wait
+    time.sleep(config.wait_time)
+
+
+# ================================================================== #
+#  Interval sweep execution (pump-probe mode)
+# ================================================================== #
+def _generate_intervals(
+    start: float, stop: float, step: float,
+    *, step_zones: list[tuple[float, float]] | None = None,
+) -> list[float]:
+    """Generate a list of intervals from start to stop (same logic as _generate_widths)."""
+    return _generate_widths(start, stop, step, step_zones=step_zones)
+
+
+def run_interval_sweep(
+    config: IntervalSweepConfig,
+    instrument: PulseInstrument,
+    callback: Callable[[int, int], None] | None = None,
+    *,
+    channels: list[int] | None = None,
+) -> None:
+    """Execute pulse interval sweep (pump-probe mode).
+
+    Same pattern as run_sweep() but switches segments that differ by interval
+    rather than by pulse width.  Trigger delay is interpolated on interval.
+    """
+    if channels is None:
+        channels = [1]
+
+    intervals = _generate_intervals(
+        config.interval_start, config.interval_stop, config.interval_step,
+        step_zones=config.step_zones,
+    )
+    total = len(intervals)
+
+    # Delay interpolation mode
+    use_table = config.delay_mode == "table" and config.delay_table is not None
+
+    # --- Table mode: build sorted arrays for numpy.interp ---
+    _table_iv: np.ndarray | None = None
+    _table_delay: np.ndarray | None = None
+    if use_table:
+        sorted_table = sorted(config.delay_table, key=lambda r: r[0])
+        _table_iv = np.array([r[0] for r in sorted_table])
+        _table_delay = np.array([r[1] for r in sorted_table], dtype=float)
+
+    # --- Exponent mode: pre-compute coefficients ---
+    delay_start = config.trigger_delay
+    delay_stop = config.trigger_delay_stop
+    sweep_delay = delay_stop is not None and delay_stop != delay_start
+
+    _coeff_a = _coeff_b = 0.0
+    _exp = config.delay_exponent
+    if not use_table and sweep_delay:
+        f_start = config.interval_start ** _exp
+        f_stop = config.interval_stop ** _exp
+        if f_start != f_stop:
+            _coeff_a = (delay_start - delay_stop) / (f_start - f_stop)
+            _coeff_b = delay_start - _coeff_a * f_start
+
+    def _apply_delay(i: int) -> None:
+        """Interpolate and apply trigger delay for step *i*."""
+        if use_table:
+            raw = float(np.interp(intervals[i], _table_iv, _table_delay))
+        elif sweep_delay:
+            raw = _coeff_a * intervals[i] ** _exp + _coeff_b
+        else:
+            return
+        delay = round(raw / 8) * 8
+        for ch in channels:
+            instrument.set_trigger_delay(delay, channel=ch)
+
+    # Arbitrary mode: switch pre-uploaded segments
+    for i in range(total):
+        logger.info("[%d/%d] segment=%d, interval=%.4e s", i + 1, total, i + 1, intervals[i])
+        time.sleep(config.wait_time)
+        _apply_delay(i)
+        for ch in channels:
+            instrument.select_segment(i, channel=ch)
+        if callback is not None:
+            callback(i, total)
     time.sleep(config.wait_time)

@@ -23,6 +23,18 @@ width_step = 5e-9
 wait_time = 1.0
 settling_time = 0.0
 
+[pump_probe]
+pulse_width = 1e-8
+pulse_interval = 2e-8
+
+[interval_sweep]
+pulse_width = 1e-8
+interval_start = 1e-8
+interval_stop = 5e-8
+interval_step = 5e-9
+wait_time = 1.0
+settling_time = 0.0
+
 [delay_sweep]
 pulse_width = 1e-8
 delay_start = 0
