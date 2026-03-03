@@ -29,6 +29,13 @@ def setup_logging() -> None:
     global _initialized
     if _initialized:
         return
+
+    # Also guard against duplicate handlers after module reload
+    root = getLogger()
+    if root.handlers:
+        _initialized = True
+        return
+
     _initialized = True
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,7 +53,6 @@ def setup_logging() -> None:
     stream_handler.setLevel(DEBUG)
     stream_handler.setFormatter(formatter)
 
-    root = getLogger()
     root.setLevel(DEBUG)
     root.addHandler(file_handler)
     root.addHandler(stream_handler)
