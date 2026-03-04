@@ -362,6 +362,10 @@ def run_integrated_interval_sweep(
             )
         logger.info("Waveform upload complete.")
 
+        # Set DC 0V after upload (no pulses until sweep starts)
+        for ch in channels:
+            instrument.set_between_cycles_dc_zero(channel=ch)
+
         # --- Phase 2: Cycle loop ---
         cycle = 0
         max_cycles = integration_config.num_cycles
@@ -387,9 +391,8 @@ def run_integrated_interval_sweep(
             if prediction.sweep_start_time > now:
                 time.sleep(prediction.sweep_start_time - now)
 
-            if cycle > 1:
-                for ch in channels:
-                    instrument.restore_user_mode(interval_config, channel=ch)
+            for ch in channels:
+                instrument.restore_user_mode(interval_config, channel=ch)
 
             logger.info("Starting interval sweep (cycle %s)...", label)
             run_interval_sweep(

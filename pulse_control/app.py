@@ -1879,6 +1879,10 @@ with tab_isweep:
                         channel=ch, callback=on_is_upload,
                     )
 
+                # Set DC 0V immediately after upload (no pulses until sweep starts)
+                for ch in channels:
+                    instrument.set_between_cycles_dc_zero(channel=ch)
+
                 # Settling phase
                 if config.settling_time > 0:
                     t0 = time.time()
@@ -1889,6 +1893,10 @@ with tab_isweep:
                             text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
                         )
                         time.sleep(0.2)
+
+                # Restore USER mode before sweep
+                for ch in channels:
+                    instrument.restore_user_mode(config, channel=ch)
 
                 sweep_start = time.time()
 
@@ -2047,6 +2055,10 @@ with tab_isweep:
                         channel=ch, callback=on_auto_is_upload,
                     )
 
+                # Set DC 0V immediately after upload (no pulses until sweep starts)
+                for ch in channels:
+                    instrument.set_between_cycles_dc_zero(channel=ch)
+
                 if config.settling_time > 0:
                     phase_status.info("Settling...")
                     t0 = time.time()
@@ -2106,9 +2118,8 @@ with tab_isweep:
                             progress.progress(pct, text=f"Sweep starts in {remaining:.1f}s")
                             time.sleep(0.2)
 
-                    if cycle > 1:
-                        for ch in channels:
-                            instrument.restore_user_mode(config, channel=ch)
+                    for ch in channels:
+                        instrument.restore_user_mode(config, channel=ch)
 
                     phase_status.info(f"Sweeping (cycle {label})...")
                     voltage_display.empty()
@@ -2319,9 +2330,9 @@ with tab_delay:
                     instrument.close()
 
 
-    # ================================================================== #
-    #  Sidebar: unified TOML save (after all tabs are built)
-    # ================================================================== #
+# ================================================================== #
+#  Sidebar: unified TOML save (after all tabs are built)
+# ================================================================== #
 
 def _build_toml_data() -> dict:
     """Build unified TOML dict from current widget state."""
