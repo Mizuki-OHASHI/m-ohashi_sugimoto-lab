@@ -38,6 +38,12 @@ from core import (
 )
 from core_34401A import DEFAULT_34401A_ADDRESS, Multimeter
 from core_integration import IntegrationConfig, detect_ramp_start
+from core_step_sync import (
+    StepSyncConfig,
+    _compute_step_levels_and_thresholds,
+    _wait_for_sequence_start,
+    detect_step_transition,
+)
 from log_setup import setup_logging
 
 DEFAULT_CONFIG = Path("configs/config.toml")
@@ -188,6 +194,7 @@ _ds = ucfg.get("delay_sweep", {})
 _pp = ucfg.get("pump_probe", {})
 _isw = ucfg.get("interval_sweep", {})
 _ig = ucfg.get("integration", {})
+_ss = ucfg.get("step_sync", {})
 
 
 # ================================================================== #
@@ -214,37 +221,41 @@ def _on_period_change() -> None:
 
 
 def _load_config_to_widgets(data: dict) -> None:
-    """Push unified TOML data into widget session state."""
+    """Push unified TOML data into widget session state.
+
+    Instead of setting each widget key directly (which conflicts with the
+    widget's ``value=`` / ``index=`` parameter), we update ``unified_config``
+    and **clear** all widget keys.  A subsequent ``st.rerun()`` at the call
+    site causes the script to re-evaluate ``_common``, ``_ws``, etc. from the
+    new ``unified_config``, and every widget re-initialises from its own
+    ``value=`` / ``index=`` parameter — no Session State API conflict.
+    """
     st.session_state.unified_config = data
 
-    save = data.get("save", {})
-    conn = data.get("connection", {})
-    common = data.get("common", {})
+    # Clear every widget key so widgets fall back to value=/index= on the
+    # next rerun.  Preserve non-widget runtime state (e.g. live connection).
+    _keep = {"_w_live_connection"}
+    for k in list(st.session_state.keys()):
+        if (k.startswith("_w_") or k.startswith("_is_")) and k not in _keep:
+            del st.session_state[k]
+
+    # Radio widgets ignore index= for already-rendered widgets (frontend
+    # caches their value).  Set their keys directly after clearing.
+    ws = data.get("width_sweep", {})
+    isw = data.get("interval_sweep", {})
+    st.session_state["_w_delay_mode_radio"] = (
+        "Table" if ws.get("delay_mode", "exponent") == "table" else "Exponent")
+    st.session_state["_w_interval_delay_mode_radio"] = (
+        "Table" if isw.get("delay_mode", "exponent") == "table" else "Exponent")
+    st.session_state["_w_sync_mode"] = (
+        "Step-Synced" if ws.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+    st.session_state["_is_sync_mode"] = (
+        "Step-Synced" if isw.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+
+    # Restore non-widget state that cannot be derived from unified_config
+    # via a simple value= parameter (requires format_si conversion).
     sp = data.get("simple_pulse", {})
     ws = data.get("width_sweep", {})
-    ds = data.get("delay_sweep", {})
-
-    # Save settings
-    st.session_state._w_save_dir = save.get("save_dir", "configs")
-    st.session_state._w_filename_format = save.get("filename_format", "")
-
-    # Connection
-    st.session_state._w_visa_address = conn.get("visa_address", DEFAULT_VISA_ADDRESS)
-
-    # Common
-    st.session_state._w_v_on = common.get("v_on", 0.0)
-    st.session_state._w_v_off = common.get("v_off", -1.0)
-    freq = common.get("frequency", 10_000_000.0)
-    st.session_state._w_freq = format_si(freq)
-    if freq > 0:
-        st.session_state._w_period = format_si(1.0 / freq)
-    st.session_state._w_trigger_delay = common.get("trigger_delay", 0)
-    st.session_state._w_resolution_n = common.get("resolution_n", 1)
-
-    # Simple Pulse
-    st.session_state._w_pulse_width = format_si(sp.get("pulse_width", 1e-8))
-    # waveform_mode is always "arbitrary" (square mode removed)
-    # Restore saved_pulse_records from simple_pulse.saved_records or width_sweep.delay_table
     _saved = sp.get("saved_records") or ws.get("delay_table")
     if _saved is not None:
         st.session_state.saved_pulse_records = [
@@ -256,59 +267,11 @@ def _load_config_to_widgets(data: dict) -> None:
             for row in _saved
         ]
     elif not st.session_state.get("saved_pulse_records"):
-        # Restore from CSV on disk (crash recovery)
         _csv_records = _load_records_from_csv()
         if _csv_records:
             st.session_state.saved_pulse_records = _csv_records
 
-    # Width Sweep
-    st.session_state._w_width_start = format_si(ws.get("width_start", 1e-8))
-    st.session_state._w_width_stop = format_si(ws.get("width_stop", 5e-8))
-    st.session_state._w_width_step = format_si(ws.get("width_step", 5e-9))
-    st.session_state._w_wait_time = format_si(ws.get("wait_time", 1.0))
-    st.session_state._w_settling_time = ws.get("settling_time", 0.0)
-    # waveform_mode is always "arbitrary" (square mode removed)
-    td_stop = ws.get("trigger_delay_stop")
-    st.session_state._w_trigger_delay_stop = (
-        td_stop if td_stop is not None else common.get("trigger_delay", 0)
-    )
-    st.session_state._w_delay_exponent = ws.get("delay_exponent", 1.0)
-    _dm = ws.get("delay_mode", "exponent")
-    st.session_state._w_delay_mode_radio = "Exponent" if _dm == "exponent" else "Table"
-    # Variable step zones
-    _sz = ws.get("step_zones", [])
-    st.session_state._w_variable_step = bool(_sz)
-    if _sz:
-        z1 = _sz[0] if len(_sz) >= 1 else [None, None]
-        st.session_state._w_step_zone1_boundary = format_si(z1[0]) if z1[0] is not None else ""
-        st.session_state._w_step_zone1_step = format_si(z1[1]) if z1[1] is not None else ""
-        z2 = _sz[1] if len(_sz) >= 2 else [None, None]
-        st.session_state._w_step_zone2_boundary = format_si(z2[0]) if z2[0] is not None else ""
-        st.session_state._w_step_zone2_step = format_si(z2[1]) if z2[1] is not None else ""
-
-    # Integration (Auto Sweep)
-    ig = data.get("integration", {})
-    st.session_state._w_ig_dmm_address = ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS)
-    st.session_state._w_ig_trigger_start = ig.get("trigger_start_voltage", -9.8)
-    st.session_state._w_ig_trigger_end = ig.get("trigger_end_voltage", -9.2)
-    st.session_state._w_ig_sweep_start = ig.get("sweep_start_voltage", -9.0)
-    st.session_state._w_ig_poll_interval = ig.get("poll_interval", 1.0)
-    st.session_state._w_ig_num_cycles = ig.get("num_cycles", 0)
-
-    # Delay Sweep
-    st.session_state._w_delay_pulse_width = format_si(ds.get("pulse_width", 1e-8))
-    st.session_state._w_delay_start = ds.get("delay_start", 0)
-    st.session_state._w_delay_stop = ds.get("delay_stop", 80)
-    st.session_state._w_delay_step = ds.get("delay_step", 8)
-    st.session_state._w_delay_wait_time = format_si(ds.get("wait_time", 1.0))
-    st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
-    # waveform_mode is always "arbitrary" (square mode removed)
-
-    # Pump-Probe
     pp = data.get("pump_probe", {})
-    st.session_state._w_pp_pulse_width = format_si(pp.get("pulse_width", 1e-8))
-    st.session_state._w_pp_pulse_interval = format_si(pp.get("pulse_interval", 2e-8))
-    # Restore saved_pp_records
     _pp_saved = pp.get("saved_records") or data.get("interval_sweep", {}).get("delay_table")
     if _pp_saved is not None:
         st.session_state.saved_pp_records = [
@@ -324,35 +287,11 @@ def _load_config_to_widgets(data: dict) -> None:
         if _pp_csv:
             st.session_state.saved_pp_records = _pp_csv
 
-    # Interval Sweep
-    isw = data.get("interval_sweep", {})
-    st.session_state._w_interval_pulse_width = format_si(isw.get("pulse_width", 1e-8))
-    st.session_state._w_interval_start = format_si(isw.get("interval_start", 1e-8))
-    st.session_state._w_interval_stop = format_si(isw.get("interval_stop", 5e-8))
-    st.session_state._w_interval_step = format_si(isw.get("interval_step", 5e-9))
-    st.session_state._w_interval_wait_time = format_si(isw.get("wait_time", 1.0))
-    st.session_state._w_interval_settling_time = isw.get("settling_time", 0.0)
-    td_stop_isw = isw.get("trigger_delay_stop")
-    st.session_state._w_interval_trigger_delay_stop = (
-        td_stop_isw if td_stop_isw is not None else common.get("trigger_delay", 0)
-    )
-    st.session_state._w_interval_delay_exponent = isw.get("delay_exponent", 1.0)
-    _dm_isw = isw.get("delay_mode", "exponent")
-    st.session_state._w_interval_delay_mode_radio = "Exponent" if _dm_isw == "exponent" else "Table"
-    _isz = isw.get("step_zones", [])
-    st.session_state._w_interval_variable_step = bool(_isz)
-    if _isz:
-        z1 = _isz[0] if len(_isz) >= 1 else [None, None]
-        st.session_state._w_interval_step_zone1_boundary = format_si(z1[0]) if z1[0] is not None else ""
-        st.session_state._w_interval_step_zone1_step = format_si(z1[1]) if z1[1] is not None else ""
-        z2 = _isz[1] if len(_isz) >= 2 else [None, None]
-        st.session_state._w_interval_step_zone2_boundary = format_si(z2[0]) if z2[0] is not None else ""
-        st.session_state._w_interval_step_zone2_step = format_si(z2[1]) if z2[1] is not None else ""
-
 
 # Process pending import BEFORE any widgets are instantiated
 if "_pending_import" in st.session_state:
     _load_config_to_widgets(st.session_state.pop("_pending_import"))
+    st.rerun()  # force re-evaluation of _common, _ws, _isw, etc.
 
 
 # ================================================================== #
@@ -1184,6 +1123,8 @@ with tab_sweep:
 
         waveform_mode = "arbitrary"
         with col_opts:
+            st.session_state.setdefault("_w_delay_mode_radio",
+                "Table" if _ws.get("delay_mode", "exponent") == "table" else "Exponent")
             delay_mode = st.radio(
                 "Delay Mode", ["Exponent", "Table"],
                 horizontal=True, key="_w_delay_mode_radio",
@@ -1193,7 +1134,8 @@ with tab_sweep:
             if _delay_mode_val == "exponent":
                 sweep_trigger_delay_stop = st.number_input(
                     "Trigger Delay Stop [points] (×8)",
-                    value=_common.get("trigger_delay", 0), min_value=0, step=8,
+                    value=_ws.get("trigger_delay_stop", _common.get("trigger_delay", 0)),
+                    min_value=0, step=8,
                     help="End value for trigger delay sweep. "
                          "Set equal to Trigger Delay for fixed delay.",
                     key="_w_trigger_delay_stop",
@@ -1383,6 +1325,17 @@ with tab_sweep:
         st.divider()
         st.text("Auto Sweep (Voltage-Triggered)")
 
+        # Sync mode selector
+        st.session_state.setdefault("_w_sync_mode",
+            "Step-Synced" if _ws.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+        w_sync_mode = st.radio(
+            "Sync Mode",
+            ["Ramp Detection", "Step-Synced"],
+            key="_w_sync_mode",
+            horizontal=True,
+            help="Ramp Detection: predict sweep start from linear ramp.  Step-Synced: sync each sweep step to external step function.",
+        )
+
         # Detection mode selector + common params
         ig_mode_col, ig_common_col = st.columns([1, 2])
 
@@ -1421,236 +1374,500 @@ with tab_sweep:
         with ig_common_col:
             _cc1, _cc2 = st.columns(2)
             with _cc1:
-                ig_poll_interval = st.number_input(
-                    "Poll Interval [s]",
-                    value=_ig.get("poll_interval", 1.0),
-                    min_value=0.1, step=0.5, format="%.1f",
-                    key="_w_ig_poll_interval",
-                    help="Interval between DMM voltage readings. Shorter = more accurate detection, but increases communication load.",
-                )
+                if w_sync_mode == "Ramp Detection":
+                    ig_poll_interval = st.number_input(
+                        "Poll Interval [s]",
+                        value=_ig.get("poll_interval", 1.0),
+                        min_value=0.1, step=0.5, format="%.1f",
+                        key="_w_ig_poll_interval",
+                        help="Interval between DMM voltage readings.",
+                    )
+                else:
+                    ig_poll_interval = _ig.get("poll_interval", 1.0)
             with _cc2:
                 ig_num_cycles = st.number_input(
                     "Cycles (0 = infinite)",
-                    value=_ig.get("num_cycles", 0),
+                    value=_ig.get("num_cycles", 0) if w_sync_mode == "Ramp Detection" else _ss.get("num_cycles", 0),
                     min_value=0, step=1,
                     key="_w_ig_num_cycles",
                     help="Number of detect-then-sweep cycles. Set 0 for infinite loop (stop by reloading the page).",
                 )
 
-        # Ramp detection parameters
-        _r1, _r2, _r3 = st.columns(3)
-        with _r1:
-            ig_trigger_start = st.number_input(
-                "Trigger Start [V]",
-                value=_ig.get("trigger_start_voltage", -9.8),
-                format="%.2f",
-                key="_w_ig_trigger_start",
-                help="Start collecting fit data when voltage crosses this value upward. Must be below Trigger End.",
-            )
-        with _r2:
-            ig_trigger_end = st.number_input(
-                "Trigger End [V]",
-                value=_ig.get("trigger_end_voltage", -9.2),
-                format="%.2f",
-                key="_w_ig_trigger_end",
-                help="Stop collecting and perform linear fit at this voltage. The range from Start to End provides data for regression.",
-            )
-        with _r3:
-            ig_sweep_start = st.number_input(
-                "Sweep Start [V]",
-                value=_ig.get("sweep_start_voltage", -9.0),
-                format="%.2f",
-                key="_w_ig_sweep_start",
-                help="Predicted voltage at which the sweep begins. Calculated from the linear fit of the ramp.",
-            )
-
-        # Build and validate IntegrationConfig
-        ig_config: IntegrationConfig | None = None
-        ig_errors: list[str] = []
-
-        if not errors_sweep and sweep_config_built is not None:
-            ig_config = IntegrationConfig(
-                dmm_visa_address=st.session_state.get("_w_ig_dmm_address", DEFAULT_34401A_ADDRESS),
-                trigger_start_voltage=float(ig_trigger_start),
-                trigger_end_voltage=float(ig_trigger_end),
-                sweep_start_voltage=float(ig_sweep_start),
-                poll_interval=float(ig_poll_interval),
-                num_cycles=int(ig_num_cycles),
-            )
-            ig_errors = ig_config.validate()
-
-        if ig_errors:
-            st.error("Integration config error:\n" + "\n".join(f"- {e}" for e in ig_errors))
-
-        can_start_auto = (
-            not bool(errors_sweep)
-            and not bool(ig_errors)
-            and bool(visa_address)
-            and sweep_config_built is not None
-            and ig_config is not None
-        )
-
-        if ig_num_cycles == 0:
-            st.caption("Cycles=0: runs until page is refreshed.")
-
-        if st.button(
-            "Start Auto Sweep",
-            disabled=not can_start_auto,
-            type="primary",
-            key="_btn_start_auto_sweep",
-        ):
-            config = sweep_config_built
-            integration = ig_config
-            channels = _CHANNEL_MAP[sweep_channel]
-            logger.info("Auto sweep started (channels=%s, cycles=%s)", channels, integration.num_cycles)
-
-            cycle_status = st.empty()
-            phase_status = st.empty()
-            voltage_display = st.empty()
-            progress = st.progress(0)
-
-            instrument = None
-            dmm = None
-            try:
-                # Connect AWG
-                phase_status.info("Connecting to AWG...")
-                instrument = PulseInstrument(config.visa_address)
-
-                # Connect DMM
-                phase_status.info("Connecting to DMM...")
-                dmm = Multimeter(integration.dmm_visa_address)
-                dmm.configure_dc_voltage()
-
-                # Upload waveforms (once)
-                widths = _generate_widths(
-                    config.width_start, config.width_stop, config.width_step,
-                    step_zones=config.step_zones,
+        if w_sync_mode == "Ramp Detection":
+            # Ramp detection parameters
+            _r1, _r2, _r3 = st.columns(3)
+            with _r1:
+                ig_trigger_start = st.number_input(
+                    "Trigger Start [V]",
+                    value=_ig.get("trigger_start_voltage", -9.8),
+                    format="%.2f",
+                    key="_w_ig_trigger_start",
+                    help="Start collecting fit data when voltage crosses this value upward.",
+                )
+            with _r2:
+                ig_trigger_end = st.number_input(
+                    "Trigger End [V]",
+                    value=_ig.get("trigger_end_voltage", -9.2),
+                    format="%.2f",
+                    key="_w_ig_trigger_end",
+                    help="Stop collecting and perform linear fit at this voltage.",
+                )
+            with _r3:
+                ig_sweep_start = st.number_input(
+                    "Sweep Start [V]",
+                    value=_ig.get("sweep_start_voltage", -9.0),
+                    format="%.2f",
+                    key="_w_ig_sweep_start",
+                    help="Predicted voltage at which the sweep begins.",
                 )
 
-                def on_auto_upload(i: int, total: int) -> None:
-                    progress.progress(
-                        (i + 1) / total,
-                        text=f"Uploading segments... [{i + 1}/{total}]",
+            # Build and validate IntegrationConfig
+            ig_config: IntegrationConfig | None = None
+            ig_errors: list[str] = []
+
+            if not errors_sweep and sweep_config_built is not None:
+                ig_config = IntegrationConfig(
+                    dmm_visa_address=st.session_state.get("_w_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+                    trigger_start_voltage=float(ig_trigger_start),
+                    trigger_end_voltage=float(ig_trigger_end),
+                    sweep_start_voltage=float(ig_sweep_start),
+                    poll_interval=float(ig_poll_interval),
+                    num_cycles=int(ig_num_cycles),
+                )
+                ig_errors = ig_config.validate()
+
+            if ig_errors:
+                st.error("Integration config error:\n" + "\n".join(f"- {e}" for e in ig_errors))
+
+            can_start_auto = (
+                not bool(errors_sweep)
+                and not bool(ig_errors)
+                and bool(visa_address)
+                and sweep_config_built is not None
+                and ig_config is not None
+            )
+
+            if ig_num_cycles == 0:
+                st.caption("Cycles=0: runs until page is refreshed.")
+
+            if st.button(
+                "Start Auto Sweep",
+                disabled=not can_start_auto,
+                type="primary",
+                key="_btn_start_auto_sweep",
+            ):
+                config = sweep_config_built
+                integration = ig_config
+                channels = _CHANNEL_MAP[sweep_channel]
+                logger.info("Auto sweep started (channels=%s, cycles=%s)", channels, integration.num_cycles)
+
+                cycle_status = st.empty()
+                phase_status = st.empty()
+                voltage_display = st.empty()
+                progress = st.progress(0)
+
+                instrument = None
+                dmm = None
+                try:
+                    # Connect AWG
+                    phase_status.info("Connecting to AWG...")
+                    instrument = PulseInstrument(config.visa_address)
+
+                    # Connect DMM
+                    phase_status.info("Connecting to DMM...")
+                    dmm = Multimeter(integration.dmm_visa_address)
+                    dmm.configure_dc_voltage()
+
+                    # Upload waveforms (once)
+                    widths = _generate_widths(
+                        config.width_start, config.width_stop, config.width_step,
+                        step_zones=config.step_zones,
                     )
 
-                for ch in channels:
-                    instrument.setup_arbitrary(config, widths, channel=ch, callback=on_auto_upload)
-
-                # Settling phase (if configured)
-                if config.settling_time > 0:
-                    phase_status.info("Settling...")
-                    t0 = time.time()
-                    while (elapsed := time.time() - t0) < config.settling_time:
-                        pct = elapsed / config.settling_time
+                    def on_auto_upload(i: int, total: int) -> None:
                         progress.progress(
-                            pct,
-                            text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                            (i + 1) / total,
+                            text=f"Uploading segments... [{i + 1}/{total}]",
                         )
-                        time.sleep(0.2)
 
-                # Cycle loop
-                max_cycles = integration.num_cycles
-                cycle = 0
+                    for ch in channels:
+                        instrument.setup_arbitrary(config, widths, channel=ch, callback=on_auto_upload)
 
-                while max_cycles == 0 or cycle < max_cycles:
-                    cycle += 1
-                    label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
-                    cycle_status.markdown(f"**Cycle {label}**")
-
-                    # Phase A: Detect ramp start
-                    phase_status.info("Waiting for ramp...")
-                    progress.progress(0, text="Monitoring voltage...")
-
-                    def on_ramp(voltage: float, phase: str) -> None:
-                        if phase == "waiting_low":
-                            voltage_display.metric(
-                                "DMM Voltage", f"{voltage:.4f} V",
-                                delta="waiting for low voltage",
-                            )
-                        elif phase == "waiting_trigger":
-                            voltage_display.metric(
-                                "DMM Voltage", f"{voltage:.4f} V",
-                                delta="waiting for ramp start",
-                            )
-                        else:  # collecting
-                            voltage_display.metric(
-                                "DMM Voltage", f"{voltage:.4f} V",
-                                delta="collecting fit data",
-                            )
-                            phase_status.info("Collecting ramp data for linear fit...")
-
-                    prediction = detect_ramp_start(dmm, integration, callback=on_ramp)
-
-                    # Show prediction results
-                    voltage_display.empty()
-                    phase_status.info(
-                        f"Fit: slope={prediction.slope:.4f} V/s, "
-                        f"R\u00b2={prediction.r_squared:.4f}, "
-                        f"n={prediction.n_points} pts"
-                    )
-
-                    # Phase B: Wait for predicted sweep start time
-                    now = time.time()
-                    wait_seconds = max(0.0, prediction.sweep_start_time - now)
-                    if wait_seconds > 0:
+                    # Settling phase (if configured)
+                    if config.settling_time > 0:
+                        phase_status.info("Settling...")
                         t0 = time.time()
-                        while (elapsed := time.time() - t0) < wait_seconds:
-                            pct = elapsed / wait_seconds
-                            remaining = wait_seconds - elapsed
+                        while (elapsed := time.time() - t0) < config.settling_time:
+                            pct = elapsed / config.settling_time
                             progress.progress(
                                 pct,
-                                text=f"Sweep starts in {remaining:.1f}s",
+                                text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
                             )
                             time.sleep(0.2)
 
-                    # Restore USER mode before sweep (2nd cycle onward)
-                    if cycle > 1:
-                        for ch in channels:
-                            instrument.restore_user_mode(config, channel=ch)
+                    # Cycle loop
+                    max_cycles = integration.num_cycles
+                    cycle = 0
 
-                    # Phase C: Sweep
-                    phase_status.info(f"Sweeping (cycle {label})...")
-                    voltage_display.empty()
-                    sweep_start = time.time()
+                    while max_cycles == 0 or cycle < max_cycles:
+                        cycle += 1
+                        label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+                        cycle_status.markdown(f"**Cycle {label}**")
 
-                    def on_auto_step(i: int, total: int) -> None:
-                        pct = (i + 1) / total
-                        elapsed = time.time() - sweep_start
-                        rate = (i + 1) / elapsed if elapsed > 0 else 0
-                        remaining = (total - i - 1) / rate if rate > 0 else 0
-                        progress.progress(
-                            pct,
-                            text=(
-                                f"Sweeping... {i + 1}/{total}"
-                                f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
-                            ),
+                        # Phase A: Detect ramp start
+                        phase_status.info("Waiting for ramp...")
+                        progress.progress(0, text="Monitoring voltage...")
+
+                        def on_ramp(voltage: float, phase: str) -> None:
+                            if phase == "waiting_low":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="waiting for low voltage",
+                                )
+                            elif phase == "waiting_trigger":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="waiting for ramp start",
+                                )
+                            else:  # collecting
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="collecting fit data",
+                                )
+                                phase_status.info("Collecting ramp data for linear fit...")
+
+                        prediction = detect_ramp_start(dmm, integration, callback=on_ramp)
+
+                        # Show prediction results
+                        voltage_display.empty()
+                        phase_status.info(
+                            f"Fit: slope={prediction.slope:.4f} V/s, "
+                            f"R\u00b2={prediction.r_squared:.4f}, "
+                            f"n={prediction.n_points} pts"
                         )
 
-                    run_sweep(config, instrument, callback=on_auto_step, channels=channels)
-                    logger.info("Auto sweep cycle %s complete", label)
+                        # Phase B: Wait for predicted sweep start time
+                        now = time.time()
+                        wait_seconds = max(0.0, prediction.sweep_start_time - now)
+                        if wait_seconds > 0:
+                            t0 = time.time()
+                            while (elapsed := time.time() - t0) < wait_seconds:
+                                pct = elapsed / wait_seconds
+                                remaining = wait_seconds - elapsed
+                                progress.progress(
+                                    pct,
+                                    text=f"Sweep starts in {remaining:.1f}s",
+                                )
+                                time.sleep(0.2)
 
-                    # Set DC 0V during wait (no pulses between cycles)
+                        # Restore USER mode before sweep (2nd cycle onward)
+                        if cycle > 1:
+                            for ch in channels:
+                                instrument.restore_user_mode(config, channel=ch)
+
+                        # Phase C: Sweep
+                        phase_status.info(f"Sweeping (cycle {label})...")
+                        voltage_display.empty()
+                        sweep_start = time.time()
+
+                        def on_auto_step(i: int, total: int) -> None:
+                            pct = (i + 1) / total
+                            elapsed = time.time() - sweep_start
+                            rate = (i + 1) / elapsed if elapsed > 0 else 0
+                            remaining = (total - i - 1) / rate if rate > 0 else 0
+                            progress.progress(
+                                pct,
+                                text=(
+                                    f"Sweeping... {i + 1}/{total}"
+                                    f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                                ),
+                            )
+
+                        run_sweep(config, instrument, callback=on_auto_step, channels=channels)
+                        logger.info("Auto sweep cycle %s complete", label)
+
+                        # Set DC 0V during wait (no pulses between cycles)
+                        for ch in channels:
+                            instrument.set_between_cycles_dc_zero(channel=ch)
+                        phase_status.info("Waiting (0V output)...")
+
+                    # All cycles complete
+                    for ch in channels:
+                        instrument.teardown(channel=ch)
+                    cycle_status.success(f"Auto sweep complete ({cycle} cycle(s))")
+                    phase_status.empty()
+                    voltage_display.empty()
+                    progress.progress(1.0, text="Done!")
+                    logger.info("Auto sweep finished (%d cycles)", cycle)
+
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
+                    logger.exception("Error during auto sweep")
+                finally:
+                    if instrument is not None:
+                        instrument.close()
+                    if dmm is not None:
+                        dmm.close()
+
+        else:  # Step-Synced mode
+            # Step-sync parameters
+            _ss1, _ss2, _ss3 = st.columns(3)
+            with _ss1:
+                ss_total_steps = st.number_input(
+                    "Total Steps (N)",
+                    value=int(_ss.get("total_steps", 30)),
+                    min_value=2, step=1,
+                    key="_w_ss_total_steps",
+                    help="Total number of discrete voltage levels in the external step function.",
+                )
+            with _ss2:
+                ss_sweep_start_step = st.number_input(
+                    "Sweep Start Step",
+                    value=int(_ss.get("sweep_start_step", 10)),
+                    min_value=0, step=1,
+                    key="_w_ss_sweep_start_step",
+                    help="0-based index where AWG sweep begins. Steps before this are monitoring-only.",
+                )
+            with _ss3:
+                ss_confirm_reads = st.number_input(
+                    "Confirm Reads",
+                    value=int(_ss.get("confirm_reads", 2)),
+                    min_value=1, step=1,
+                    key="_w_ss_confirm_reads",
+                    help="Consecutive DMM reads above threshold to confirm a step transition.",
+                )
+
+            _ss4, _ss5, _ss6, _ss7 = st.columns(4)
+            with _ss4:
+                ss_v_start = st.number_input(
+                    "V Start [V]",
+                    value=_ss.get("v_start", -10.0),
+                    format="%.1f",
+                    key="_w_ss_v_start",
+                    help="Voltage at step 0.",
+                )
+            with _ss5:
+                ss_v_stop = st.number_input(
+                    "V Stop [V]",
+                    value=_ss.get("v_stop", 10.0),
+                    format="%.1f",
+                    key="_w_ss_v_stop",
+                    help="Voltage at step N-1.",
+                )
+            with _ss6:
+                ss_poll_interval = st.number_input(
+                    "Poll Interval [s]",
+                    value=_ss.get("poll_interval", 0.1),
+                    min_value=0.01, step=0.05, format="%.2f",
+                    key="_w_ss_poll_interval",
+                    help="Interval between DMM voltage reads.",
+                )
+            with _ss7:
+                ss_step_timeout = st.number_input(
+                    "Step Timeout [s]",
+                    value=_ss.get("step_timeout", 10.0),
+                    min_value=0.1, step=1.0, format="%.1f",
+                    key="_w_ss_step_timeout",
+                    help="Max seconds to wait for a single step transition.",
+                )
+
+            with st.expander("Restart Settings", expanded=False):
+                _rs1, _rs2 = st.columns(2)
+                with _rs1:
+                    ss_restart_voltage = st.number_input(
+                        "Restart Voltage [V]",
+                        value=_ss.get("restart_voltage", -9.5),
+                        format="%.1f",
+                        key="_w_ss_restart_voltage",
+                        help="Voltage below which a new sequence start is detected.",
+                    )
+                with _rs2:
+                    ss_restart_timeout = st.number_input(
+                        "Restart Timeout [s]",
+                        value=_ss.get("restart_timeout", 60.0),
+                        min_value=1.0, step=10.0, format="%.0f",
+                        key="_w_ss_restart_timeout",
+                        help="Max seconds to wait for sequence restart between cycles.",
+                    )
+
+            # Build and validate StepSyncConfig
+            w_ss_config: StepSyncConfig | None = None
+            w_ss_errors: list[str] = []
+
+            if not errors_sweep and sweep_config_built is not None:
+                w_ss_config = StepSyncConfig(
+                    dmm_visa_address=st.session_state.get("_w_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+                    total_steps=int(ss_total_steps),
+                    sweep_start_step=int(ss_sweep_start_step),
+                    v_start=float(ss_v_start),
+                    v_stop=float(ss_v_stop),
+                    poll_interval=float(ss_poll_interval),
+                    confirm_reads=int(ss_confirm_reads),
+                    step_timeout=float(ss_step_timeout),
+                    num_cycles=int(ig_num_cycles),
+                    restart_voltage=float(ss_restart_voltage),
+                    restart_timeout=float(ss_restart_timeout),
+                )
+                w_ss_errors = w_ss_config.validate()
+
+                # Check segment count fits
+                n_widths = len(_generate_widths(
+                    sweep_config_built.width_start,
+                    sweep_config_built.width_stop,
+                    sweep_config_built.width_step,
+                    step_zones=sweep_config_built.step_zones,
+                ))
+                available = int(ss_total_steps) - int(ss_sweep_start_step)
+                if n_widths > available:
+                    w_ss_errors.append(
+                        f"Sweep has {n_widths} segments but only {available} "
+                        f"steps available (total_steps - sweep_start_step)"
+                    )
+
+            if w_ss_errors:
+                st.error("Step-sync config error:\n" + "\n".join(f"- {e}" for e in w_ss_errors))
+
+            can_start_ss = (
+                not bool(errors_sweep)
+                and not bool(w_ss_errors)
+                and bool(visa_address)
+                and sweep_config_built is not None
+                and w_ss_config is not None
+            )
+
+            if ig_num_cycles == 0:
+                st.caption("Cycles=0: runs until page is refreshed.")
+
+            if st.button(
+                "Start Step-Synced Sweep",
+                disabled=not can_start_ss,
+                type="primary",
+                key="_btn_start_step_sync_sweep",
+            ):
+                config = sweep_config_built
+                ss_cfg = w_ss_config
+                channels = _CHANNEL_MAP[sweep_channel]
+                logger.info(
+                    "Step-synced sweep started (channels=%s, total_steps=%d, sweep_start=%d)",
+                    channels, ss_cfg.total_steps, ss_cfg.sweep_start_step,
+                )
+
+                cycle_status = st.empty()
+                phase_status = st.empty()
+                voltage_display = st.empty()
+                progress = st.progress(0)
+
+                instrument = None
+                dmm = None
+                try:
+                    phase_status.info("Connecting to AWG...")
+                    instrument = PulseInstrument(config.visa_address)
+
+                    phase_status.info("Connecting to DMM...")
+                    dmm = Multimeter(ss_cfg.dmm_visa_address)
+                    dmm.configure_dc_voltage()
+
+                    # Upload waveforms (once)
+                    widths = _generate_widths(
+                        config.width_start, config.width_stop, config.width_step,
+                        step_zones=config.step_zones,
+                    )
+                    sweep_segments = len(widths)
+
+                    def on_ss_upload(i: int, total: int) -> None:
+                        progress.progress(
+                            (i + 1) / total,
+                            text=f"Uploading segments... [{i + 1}/{total}]",
+                        )
+
+                    for ch in channels:
+                        instrument.setup_arbitrary(config, widths, channel=ch, callback=on_ss_upload)
+
                     for ch in channels:
                         instrument.set_between_cycles_dc_zero(channel=ch)
-                    phase_status.info("Waiting (0V output)...")
 
-                # All cycles complete
-                for ch in channels:
-                    instrument.teardown(channel=ch)
-                cycle_status.success(f"Auto sweep complete ({cycle} cycle(s))")
-                phase_status.empty()
-                voltage_display.empty()
-                progress.progress(1.0, text="Done!")
-                logger.info("Auto sweep finished (%d cycles)", cycle)
+                    # Pre-compute step levels and thresholds
+                    levels, thresholds = _compute_step_levels_and_thresholds(ss_cfg)
 
-            except Exception as exc:
-                st.error(f"Error: {exc}")
-                logger.exception("Error during auto sweep")
-            finally:
-                if instrument is not None:
-                    instrument.close()
-                if dmm is not None:
-                    dmm.close()
+                    # Build delay applier
+                    from core_step_sync import _build_delay_applier_width
+                    apply_delay = _build_delay_applier_width(config, widths, channels, instrument)
+
+                    max_cycles = ss_cfg.num_cycles
+                    cycle = 0
+
+                    while max_cycles == 0 or cycle < max_cycles:
+                        cycle += 1
+                        label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+                        cycle_status.markdown(f"**Cycle {label}**")
+
+                        # Wait for sequence start
+                        phase_status.info("Waiting for sequence start...")
+                        progress.progress(0, text="Monitoring voltage...")
+
+                        def on_ss_step(voltage: float, step_idx: int, phase: str) -> None:
+                            if phase == "waiting_restart":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="waiting for sequence restart",
+                                )
+                            elif phase == "monitoring":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta=f"monitoring step {step_idx}/{ss_cfg.total_steps}",
+                                )
+                                phase_status.info(f"Monitoring step {step_idx}/{ss_cfg.total_steps}")
+                            elif phase == "detecting":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta=f"detecting step {step_idx + 1}",
+                                )
+
+                        _wait_for_sequence_start(dmm, ss_cfg, callback=on_ss_step)
+
+                        # Monitoring phase
+                        phase_status.info(f"Monitoring ({ss_cfg.sweep_start_step} steps)...")
+
+                        from core_step_sync import _run_step_synced_loop
+
+                        def on_ss_sweep(i: int, total: int) -> None:
+                            pct = (i + 1) / total
+                            progress.progress(
+                                pct,
+                                text=f"Step-synced sweep... {i + 1}/{total}",
+                            )
+
+                        _run_step_synced_loop(
+                            instrument, dmm,
+                            config, ss_cfg,
+                            levels, thresholds,
+                            sweep_segments, apply_delay,
+                            channels=channels,
+                            sweep_callback=on_ss_sweep,
+                            step_callback=on_ss_step,
+                        )
+
+                        logger.info("Step-synced sweep cycle %s complete", label)
+                        for ch in channels:
+                            instrument.set_between_cycles_dc_zero(channel=ch)
+                        phase_status.info("Waiting (0V output)...")
+
+                    for ch in channels:
+                        instrument.teardown(channel=ch)
+                    cycle_status.success(f"Step-synced sweep complete ({cycle} cycle(s))")
+                    phase_status.empty()
+                    voltage_display.empty()
+                    progress.progress(1.0, text="Done!")
+                    logger.info("Step-synced sweep finished (%d cycles)", cycle)
+
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
+                    logger.exception("Error during step-synced sweep")
+                finally:
+                    if instrument is not None:
+                        instrument.close()
+                    if dmm is not None:
+                        dmm.close()
 
 # ================================================================== #
 #  Interval Sweep tab (pump-probe mode)
@@ -1691,15 +1908,36 @@ with tab_isweep:
             )
 
             # Variable step zones
+            _is_szones = _isw.get("step_zones", [])
             _is_var_step = st.checkbox(
-                "Variable step zones", key="_w_interval_variable_step",
+                "Variable step zones",
+                value=bool(_is_szones),
+                key="_w_interval_variable_step",
             )
             _is_step_zones: list[tuple[float, float]] | None = None
             if _is_var_step:
-                _isz1_b = st.text_input("Zone 1 boundary [s]", key="_w_interval_step_zone1_boundary")
-                _isz1_s = st.text_input("Zone 1 step [s]", key="_w_interval_step_zone1_step")
-                _isz2_b = st.text_input("Zone 2 boundary [s]", key="_w_interval_step_zone2_boundary")
-                _isz2_s = st.text_input("Zone 2 step [s]", key="_w_interval_step_zone2_step")
+                _isz1 = _is_szones[0] if len(_is_szones) >= 1 else [None, None]
+                _isz2 = _is_szones[1] if len(_is_szones) >= 2 else [None, None]
+                _isz1_b = st.text_input(
+                    "Zone 1 boundary [s]",
+                    value=format_si(_isz1[0]) if _isz1[0] is not None else "",
+                    key="_w_interval_step_zone1_boundary",
+                )
+                _isz1_s = st.text_input(
+                    "Zone 1 step [s]",
+                    value=format_si(_isz1[1]) if _isz1[1] is not None else "",
+                    key="_w_interval_step_zone1_step",
+                )
+                _isz2_b = st.text_input(
+                    "Zone 2 boundary [s]",
+                    value=format_si(_isz2[0]) if _isz2[0] is not None else "",
+                    key="_w_interval_step_zone2_boundary",
+                )
+                _isz2_s = st.text_input(
+                    "Zone 2 step [s]",
+                    value=format_si(_isz2[1]) if _isz2[1] is not None else "",
+                    key="_w_interval_step_zone2_step",
+                )
 
                 _is_step_zones = []
                 for b_str, s_str in [(_isz1_b, _isz1_s), (_isz2_b, _isz2_s)]:
@@ -1728,6 +1966,8 @@ with tab_isweep:
             )
 
         with is_col_opts:
+            st.session_state.setdefault("_w_interval_delay_mode_radio",
+                "Table" if _isw.get("delay_mode", "exponent") == "table" else "Exponent")
             is_delay_mode = st.radio(
                 "Delay Mode", ["Exponent", "Table"], key="_w_interval_delay_mode_radio",
             )
@@ -1934,6 +2174,17 @@ with tab_isweep:
         st.divider()
         st.text("Auto Sweep (Voltage-Triggered)")
 
+        # Sync mode selector
+        st.session_state.setdefault("_is_sync_mode",
+            "Step-Synced" if _isw.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+        is_sync_mode = st.radio(
+            "Sync Mode",
+            ["Ramp Detection", "Step-Synced"],
+            key="_is_sync_mode",
+            horizontal=True,
+            help="Ramp Detection: predict sweep start from linear ramp.  Step-Synced: sync each sweep step to external step function.",
+        )
+
         is_ig_mode_col, is_ig_common_col = st.columns([1, 2])
 
         with is_ig_mode_col:
@@ -1947,220 +2198,479 @@ with tab_isweep:
         with is_ig_common_col:
             _isc1, _isc2 = st.columns(2)
             with _isc1:
-                is_ig_poll = st.number_input(
-                    "Poll Interval [s]",
-                    value=_ig.get("poll_interval", 1.0),
-                    min_value=0.1, step=0.5, format="%.1f",
-                    key="_w_is_ig_poll_interval",
-                )
+                if is_sync_mode == "Ramp Detection":
+                    is_ig_poll = st.number_input(
+                        "Poll Interval [s]",
+                        value=_ig.get("poll_interval", 1.0),
+                        min_value=0.1, step=0.5, format="%.1f",
+                        key="_w_is_ig_poll_interval",
+                    )
+                else:
+                    is_ig_poll = _ig.get("poll_interval", 1.0)
             with _isc2:
                 is_ig_cycles = st.number_input(
                     "Cycles (0 = infinite)",
-                    value=_ig.get("num_cycles", 0),
+                    value=_ig.get("num_cycles", 0) if is_sync_mode == "Ramp Detection" else _ss.get("num_cycles", 0),
                     min_value=0, step=1,
                     key="_w_is_ig_num_cycles",
                 )
 
-        _isr1, _isr2, _isr3 = st.columns(3)
-        with _isr1:
-            is_ig_trig_start = st.number_input(
-                "Trigger Start [V]",
-                value=_ig.get("trigger_start_voltage", -9.8),
-                format="%.2f",
-                key="_w_is_ig_trigger_start",
-            )
-        with _isr2:
-            is_ig_trig_end = st.number_input(
-                "Trigger End [V]",
-                value=_ig.get("trigger_end_voltage", -9.2),
-                format="%.2f",
-                key="_w_is_ig_trigger_end",
-            )
-        with _isr3:
-            is_ig_sweep_start = st.number_input(
-                "Sweep Start [V]",
-                value=_ig.get("sweep_start_voltage", -9.0),
-                format="%.2f",
-                key="_w_is_ig_sweep_start",
-            )
-
-        is_ig_config: IntegrationConfig | None = None
-        is_ig_errors: list[str] = []
-
-        if not errors_isweep and interval_config_built is not None:
-            is_ig_config = IntegrationConfig(
-                dmm_visa_address=st.session_state.get("_w_is_ig_dmm_address", DEFAULT_34401A_ADDRESS),
-                trigger_start_voltage=float(is_ig_trig_start),
-                trigger_end_voltage=float(is_ig_trig_end),
-                sweep_start_voltage=float(is_ig_sweep_start),
-                poll_interval=float(is_ig_poll),
-                num_cycles=int(is_ig_cycles),
-            )
-            is_ig_errors = is_ig_config.validate()
-
-        if is_ig_errors:
-            st.error("Integration config error:\n" + "\n".join(f"- {e}" for e in is_ig_errors))
-
-        can_start_auto_is = (
-            not bool(errors_isweep)
-            and not bool(is_ig_errors)
-            and bool(visa_address)
-            and interval_config_built is not None
-            and is_ig_config is not None
-        )
-
-        if is_ig_cycles == 0:
-            st.caption("Cycles=0: runs until page is refreshed.")
-
-        if st.button(
-            "Start Auto Interval Sweep",
-            disabled=not can_start_auto_is,
-            type="primary",
-            key="_btn_start_auto_interval_sweep",
-        ):
-            config = interval_config_built
-            integration = is_ig_config
-            channels = _CHANNEL_MAP[is_channel]
-            logger.info("Auto interval sweep started (channels=%s, cycles=%s)", channels, integration.num_cycles)
-
-            cycle_status = st.empty()
-            phase_status = st.empty()
-            voltage_display = st.empty()
-            progress = st.progress(0)
-
-            instrument = None
-            dmm = None
-            try:
-                phase_status.info("Connecting to AWG...")
-                instrument = PulseInstrument(config.visa_address)
-
-                phase_status.info("Connecting to DMM...")
-                dmm = Multimeter(integration.dmm_visa_address)
-                dmm.configure_dc_voltage()
-
-                intervals_list = _generate_intervals(
-                    config.interval_start, config.interval_stop, config.interval_step,
-                    step_zones=config.step_zones,
+        if is_sync_mode == "Ramp Detection":
+            _isr1, _isr2, _isr3 = st.columns(3)
+            with _isr1:
+                is_ig_trig_start = st.number_input(
+                    "Trigger Start [V]",
+                    value=_ig.get("trigger_start_voltage", -9.8),
+                    format="%.2f",
+                    key="_w_is_ig_trigger_start",
+                )
+            with _isr2:
+                is_ig_trig_end = st.number_input(
+                    "Trigger End [V]",
+                    value=_ig.get("trigger_end_voltage", -9.2),
+                    format="%.2f",
+                    key="_w_is_ig_trigger_end",
+                )
+            with _isr3:
+                is_ig_sweep_start = st.number_input(
+                    "Sweep Start [V]",
+                    value=_ig.get("sweep_start_voltage", -9.0),
+                    format="%.2f",
+                    key="_w_is_ig_sweep_start",
                 )
 
-                def on_auto_is_upload(i: int, total: int) -> None:
-                    progress.progress(
-                        (i + 1) / total,
-                        text=f"Uploading segments... [{i + 1}/{total}]",
+            is_ig_config: IntegrationConfig | None = None
+            is_ig_errors: list[str] = []
+
+            if not errors_isweep and interval_config_built is not None:
+                is_ig_config = IntegrationConfig(
+                    dmm_visa_address=st.session_state.get("_w_is_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+                    trigger_start_voltage=float(is_ig_trig_start),
+                    trigger_end_voltage=float(is_ig_trig_end),
+                    sweep_start_voltage=float(is_ig_sweep_start),
+                    poll_interval=float(is_ig_poll),
+                    num_cycles=int(is_ig_cycles),
+                )
+                is_ig_errors = is_ig_config.validate()
+
+            if is_ig_errors:
+                st.error("Integration config error:\n" + "\n".join(f"- {e}" for e in is_ig_errors))
+
+            can_start_auto_is = (
+                not bool(errors_isweep)
+                and not bool(is_ig_errors)
+                and bool(visa_address)
+                and interval_config_built is not None
+                and is_ig_config is not None
+            )
+
+            if is_ig_cycles == 0:
+                st.caption("Cycles=0: runs until page is refreshed.")
+
+            if st.button(
+                "Start Auto Interval Sweep",
+                disabled=not can_start_auto_is,
+                type="primary",
+                key="_btn_start_auto_interval_sweep",
+            ):
+                config = interval_config_built
+                integration = is_ig_config
+                channels = _CHANNEL_MAP[is_channel]
+                logger.info("Auto interval sweep started (channels=%s, cycles=%s)", channels, integration.num_cycles)
+
+                cycle_status = st.empty()
+                phase_status = st.empty()
+                voltage_display = st.empty()
+                progress = st.progress(0)
+
+                instrument = None
+                dmm = None
+                try:
+                    phase_status.info("Connecting to AWG...")
+                    instrument = PulseInstrument(config.visa_address)
+
+                    phase_status.info("Connecting to DMM...")
+                    dmm = Multimeter(integration.dmm_visa_address)
+                    dmm.configure_dc_voltage()
+
+                    intervals_list = _generate_intervals(
+                        config.interval_start, config.interval_stop, config.interval_step,
+                        step_zones=config.step_zones,
                     )
 
-                for ch in channels:
-                    instrument.setup_pump_probe_arbitrary(
-                        config, config.pulse_width, intervals_list,
-                        channel=ch, callback=on_auto_is_upload,
-                    )
-
-                # Set DC 0V immediately after upload (no pulses until sweep starts)
-                for ch in channels:
-                    instrument.set_between_cycles_dc_zero(channel=ch)
-
-                if config.settling_time > 0:
-                    phase_status.info("Settling...")
-                    t0 = time.time()
-                    while (elapsed := time.time() - t0) < config.settling_time:
-                        pct = elapsed / config.settling_time
+                    def on_auto_is_upload(i: int, total: int) -> None:
                         progress.progress(
-                            pct,
-                            text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                            (i + 1) / total,
+                            text=f"Uploading segments... [{i + 1}/{total}]",
                         )
-                        time.sleep(0.2)
-
-                max_cycles = integration.num_cycles
-                cycle = 0
-
-                while max_cycles == 0 or cycle < max_cycles:
-                    cycle += 1
-                    label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
-                    cycle_status.markdown(f"**Cycle {label}**")
-
-                    phase_status.info("Waiting for ramp...")
-                    progress.progress(0, text="Monitoring voltage...")
-
-                    def on_is_ramp(voltage: float, phase: str) -> None:
-                        if phase == "waiting_low":
-                            voltage_display.metric(
-                                "DMM Voltage", f"{voltage:.4f} V",
-                                delta="waiting for low voltage",
-                            )
-                        elif phase == "waiting_trigger":
-                            voltage_display.metric(
-                                "DMM Voltage", f"{voltage:.4f} V",
-                                delta="waiting for ramp start",
-                            )
-                        else:
-                            voltage_display.metric(
-                                "DMM Voltage", f"{voltage:.4f} V",
-                                delta="collecting fit data",
-                            )
-                            phase_status.info("Collecting ramp data for linear fit...")
-
-                    prediction = detect_ramp_start(dmm, integration, callback=on_is_ramp)
-
-                    voltage_display.empty()
-                    phase_status.info(
-                        f"Fit: slope={prediction.slope:.4f} V/s, "
-                        f"R\u00b2={prediction.r_squared:.4f}, "
-                        f"n={prediction.n_points} pts"
-                    )
-
-                    now = time.time()
-                    wait_seconds = max(0.0, prediction.sweep_start_time - now)
-                    if wait_seconds > 0:
-                        t0 = time.time()
-                        while (elapsed := time.time() - t0) < wait_seconds:
-                            pct = elapsed / wait_seconds
-                            remaining = wait_seconds - elapsed
-                            progress.progress(pct, text=f"Sweep starts in {remaining:.1f}s")
-                            time.sleep(0.2)
 
                     for ch in channels:
-                        instrument.restore_user_mode(config, channel=ch)
-
-                    phase_status.info(f"Sweeping (cycle {label})...")
-                    voltage_display.empty()
-                    sweep_start = time.time()
-
-                    def on_auto_is_step(i: int, total: int) -> None:
-                        pct = (i + 1) / total
-                        elapsed = time.time() - sweep_start
-                        rate = (i + 1) / elapsed if elapsed > 0 else 0
-                        remaining = (total - i - 1) / rate if rate > 0 else 0
-                        progress.progress(
-                            pct,
-                            text=(
-                                f"Sweeping... {i + 1}/{total}"
-                                f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
-                            ),
+                        instrument.setup_pump_probe_arbitrary(
+                            config, config.pulse_width, intervals_list,
+                            channel=ch, callback=on_auto_is_upload,
                         )
 
-                    run_interval_sweep(config, instrument, callback=on_auto_is_step, channels=channels)
-                    logger.info("Auto interval sweep cycle %s complete", label)
+                    # Set DC 0V immediately after upload (no pulses until sweep starts)
+                    for ch in channels:
+                        instrument.set_between_cycles_dc_zero(channel=ch)
+
+                    if config.settling_time > 0:
+                        phase_status.info("Settling...")
+                        t0 = time.time()
+                        while (elapsed := time.time() - t0) < config.settling_time:
+                            pct = elapsed / config.settling_time
+                            progress.progress(
+                                pct,
+                                text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                            )
+                            time.sleep(0.2)
+
+                    max_cycles = integration.num_cycles
+                    cycle = 0
+
+                    while max_cycles == 0 or cycle < max_cycles:
+                        cycle += 1
+                        label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+                        cycle_status.markdown(f"**Cycle {label}**")
+
+                        phase_status.info("Waiting for ramp...")
+                        progress.progress(0, text="Monitoring voltage...")
+
+                        def on_is_ramp(voltage: float, phase: str) -> None:
+                            if phase == "waiting_low":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="waiting for low voltage",
+                                )
+                            elif phase == "waiting_trigger":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="waiting for ramp start",
+                                )
+                            else:
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="collecting fit data",
+                                )
+                                phase_status.info("Collecting ramp data for linear fit...")
+
+                        prediction = detect_ramp_start(dmm, integration, callback=on_is_ramp)
+
+                        voltage_display.empty()
+                        phase_status.info(
+                            f"Fit: slope={prediction.slope:.4f} V/s, "
+                            f"R\u00b2={prediction.r_squared:.4f}, "
+                            f"n={prediction.n_points} pts"
+                        )
+
+                        now = time.time()
+                        wait_seconds = max(0.0, prediction.sweep_start_time - now)
+                        if wait_seconds > 0:
+                            t0 = time.time()
+                            while (elapsed := time.time() - t0) < wait_seconds:
+                                pct = elapsed / wait_seconds
+                                remaining = wait_seconds - elapsed
+                                progress.progress(pct, text=f"Sweep starts in {remaining:.1f}s")
+                                time.sleep(0.2)
+
+                        for ch in channels:
+                            instrument.restore_user_mode(config, channel=ch)
+
+                        phase_status.info(f"Sweeping (cycle {label})...")
+                        voltage_display.empty()
+                        sweep_start = time.time()
+
+                        def on_auto_is_step(i: int, total: int) -> None:
+                            pct = (i + 1) / total
+                            elapsed = time.time() - sweep_start
+                            rate = (i + 1) / elapsed if elapsed > 0 else 0
+                            remaining = (total - i - 1) / rate if rate > 0 else 0
+                            progress.progress(
+                                pct,
+                                text=(
+                                    f"Sweeping... {i + 1}/{total}"
+                                    f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                                ),
+                            )
+
+                        run_interval_sweep(config, instrument, callback=on_auto_is_step, channels=channels)
+                        logger.info("Auto interval sweep cycle %s complete", label)
+
+                        for ch in channels:
+                            instrument.set_between_cycles_dc_zero(channel=ch)
+                        phase_status.info("Waiting (0V output)...")
+
+                    for ch in channels:
+                        instrument.teardown(channel=ch)
+                    cycle_status.success(f"Auto interval sweep complete ({cycle} cycle(s))")
+                    phase_status.empty()
+                    voltage_display.empty()
+                    progress.progress(1.0, text="Done!")
+                    logger.info("Auto interval sweep finished (%d cycles)", cycle)
+
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
+                    logger.exception("Error during auto interval sweep")
+                finally:
+                    if instrument is not None:
+                        instrument.close()
+                    if dmm is not None:
+                        dmm.close()
+
+        else:  # Step-Synced mode for interval sweep
+            _iss1, _iss2, _iss3 = st.columns(3)
+            with _iss1:
+                is_ss_total_steps = st.number_input(
+                    "Total Steps (N)",
+                    value=int(_ss.get("total_steps", 30)),
+                    min_value=2, step=1,
+                    key="_is_ss_total_steps",
+                    help="Total number of discrete voltage levels in the external step function.",
+                )
+            with _iss2:
+                is_ss_sweep_start_step = st.number_input(
+                    "Sweep Start Step",
+                    value=int(_ss.get("sweep_start_step", 10)),
+                    min_value=0, step=1,
+                    key="_is_ss_sweep_start_step",
+                    help="0-based index where AWG sweep begins. Steps before this are monitoring-only.",
+                )
+            with _iss3:
+                is_ss_confirm_reads = st.number_input(
+                    "Confirm Reads",
+                    value=int(_ss.get("confirm_reads", 2)),
+                    min_value=1, step=1,
+                    key="_is_ss_confirm_reads",
+                    help="Consecutive DMM reads above threshold to confirm a step transition.",
+                )
+
+            _iss4, _iss5, _iss6, _iss7 = st.columns(4)
+            with _iss4:
+                is_ss_v_start = st.number_input(
+                    "V Start [V]",
+                    value=_ss.get("v_start", -10.0),
+                    format="%.1f",
+                    key="_is_ss_v_start",
+                    help="Voltage at step 0.",
+                )
+            with _iss5:
+                is_ss_v_stop = st.number_input(
+                    "V Stop [V]",
+                    value=_ss.get("v_stop", 10.0),
+                    format="%.1f",
+                    key="_is_ss_v_stop",
+                    help="Voltage at step N-1.",
+                )
+            with _iss6:
+                is_ss_poll_interval = st.number_input(
+                    "Poll Interval [s]",
+                    value=_ss.get("poll_interval", 0.1),
+                    min_value=0.01, step=0.05, format="%.2f",
+                    key="_is_ss_poll_interval",
+                    help="Interval between DMM voltage reads.",
+                )
+            with _iss7:
+                is_ss_step_timeout = st.number_input(
+                    "Step Timeout [s]",
+                    value=_ss.get("step_timeout", 10.0),
+                    min_value=0.1, step=1.0, format="%.1f",
+                    key="_is_ss_step_timeout",
+                    help="Max seconds to wait for a single step transition.",
+                )
+
+            with st.expander("Restart Settings", expanded=False):
+                _isrs1, _isrs2 = st.columns(2)
+                with _isrs1:
+                    is_ss_restart_voltage = st.number_input(
+                        "Restart Voltage [V]",
+                        value=_ss.get("restart_voltage", -9.5),
+                        format="%.1f",
+                        key="_is_ss_restart_voltage",
+                        help="Voltage below which a new sequence start is detected.",
+                    )
+                with _isrs2:
+                    is_ss_restart_timeout = st.number_input(
+                        "Restart Timeout [s]",
+                        value=_ss.get("restart_timeout", 60.0),
+                        min_value=1.0, step=10.0, format="%.0f",
+                        key="_is_ss_restart_timeout",
+                        help="Max seconds to wait for sequence restart between cycles.",
+                    )
+
+            is_ss_config: StepSyncConfig | None = None
+            is_ss_errors: list[str] = []
+
+            if not errors_isweep and interval_config_built is not None:
+                is_ss_config = StepSyncConfig(
+                    dmm_visa_address=st.session_state.get("_w_is_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+                    total_steps=int(is_ss_total_steps),
+                    sweep_start_step=int(is_ss_sweep_start_step),
+                    v_start=float(is_ss_v_start),
+                    v_stop=float(is_ss_v_stop),
+                    poll_interval=float(is_ss_poll_interval),
+                    confirm_reads=int(is_ss_confirm_reads),
+                    step_timeout=float(is_ss_step_timeout),
+                    num_cycles=int(is_ig_cycles),
+                    restart_voltage=float(is_ss_restart_voltage),
+                    restart_timeout=float(is_ss_restart_timeout),
+                )
+                is_ss_errors = is_ss_config.validate()
+
+                n_intervals = len(_generate_intervals(
+                    interval_config_built.interval_start,
+                    interval_config_built.interval_stop,
+                    interval_config_built.interval_step,
+                    step_zones=interval_config_built.step_zones,
+                ))
+                available = int(is_ss_total_steps) - int(is_ss_sweep_start_step)
+                if n_intervals > available:
+                    is_ss_errors.append(
+                        f"Interval sweep has {n_intervals} segments but only {available} "
+                        f"steps available (total_steps - sweep_start_step)"
+                    )
+
+            if is_ss_errors:
+                st.error("Step-sync config error:\n" + "\n".join(f"- {e}" for e in is_ss_errors))
+
+            can_start_ss_is = (
+                not bool(errors_isweep)
+                and not bool(is_ss_errors)
+                and bool(visa_address)
+                and interval_config_built is not None
+                and is_ss_config is not None
+            )
+
+            if is_ig_cycles == 0:
+                st.caption("Cycles=0: runs until page is refreshed.")
+
+            if st.button(
+                "Start Step-Synced Interval Sweep",
+                disabled=not can_start_ss_is,
+                type="primary",
+                key="_btn_start_step_sync_interval_sweep",
+            ):
+                config = interval_config_built
+                ss_cfg = is_ss_config
+                channels = _CHANNEL_MAP[is_channel]
+                logger.info(
+                    "Step-synced interval sweep started (channels=%s, total_steps=%d, sweep_start=%d)",
+                    channels, ss_cfg.total_steps, ss_cfg.sweep_start_step,
+                )
+
+                cycle_status = st.empty()
+                phase_status = st.empty()
+                voltage_display = st.empty()
+                progress = st.progress(0)
+
+                instrument = None
+                dmm = None
+                try:
+                    phase_status.info("Connecting to AWG...")
+                    instrument = PulseInstrument(config.visa_address)
+
+                    phase_status.info("Connecting to DMM...")
+                    dmm = Multimeter(ss_cfg.dmm_visa_address)
+                    dmm.configure_dc_voltage()
+
+                    intervals_list = _generate_intervals(
+                        config.interval_start, config.interval_stop, config.interval_step,
+                        step_zones=config.step_zones,
+                    )
+                    sweep_segments = len(intervals_list)
+
+                    def on_ss_is_upload(i: int, total: int) -> None:
+                        progress.progress(
+                            (i + 1) / total,
+                            text=f"Uploading segments... [{i + 1}/{total}]",
+                        )
+
+                    for ch in channels:
+                        instrument.setup_pump_probe_arbitrary(
+                            config, config.pulse_width, intervals_list,
+                            channel=ch, callback=on_ss_is_upload,
+                        )
 
                     for ch in channels:
                         instrument.set_between_cycles_dc_zero(channel=ch)
-                    phase_status.info("Waiting (0V output)...")
 
-                for ch in channels:
-                    instrument.teardown(channel=ch)
-                cycle_status.success(f"Auto interval sweep complete ({cycle} cycle(s))")
-                phase_status.empty()
-                voltage_display.empty()
-                progress.progress(1.0, text="Done!")
-                logger.info("Auto interval sweep finished (%d cycles)", cycle)
+                    levels, thresholds = _compute_step_levels_and_thresholds(ss_cfg)
 
-            except Exception as exc:
-                st.error(f"Error: {exc}")
-                logger.exception("Error during auto interval sweep")
-            finally:
-                if instrument is not None:
-                    instrument.close()
-                if dmm is not None:
-                    dmm.close()
+                    from core_step_sync import _build_delay_applier_interval
+                    apply_delay = _build_delay_applier_interval(config, intervals_list, channels, instrument)
+
+                    max_cycles = ss_cfg.num_cycles
+                    cycle = 0
+
+                    while max_cycles == 0 or cycle < max_cycles:
+                        cycle += 1
+                        label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+                        cycle_status.markdown(f"**Cycle {label}**")
+
+                        phase_status.info("Waiting for sequence start...")
+                        progress.progress(0, text="Monitoring voltage...")
+
+                        def on_ss_is_step(voltage: float, step_idx: int, phase: str) -> None:
+                            if phase == "waiting_restart":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta="waiting for sequence restart",
+                                )
+                            elif phase == "monitoring":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta=f"monitoring step {step_idx}/{ss_cfg.total_steps}",
+                                )
+                                phase_status.info(f"Monitoring step {step_idx}/{ss_cfg.total_steps}")
+                            elif phase == "detecting":
+                                voltage_display.metric(
+                                    "DMM Voltage", f"{voltage:.4f} V",
+                                    delta=f"detecting step {step_idx + 1}",
+                                )
+
+                        _wait_for_sequence_start(dmm, ss_cfg, callback=on_ss_is_step)
+
+                        phase_status.info(f"Monitoring ({ss_cfg.sweep_start_step} steps)...")
+
+                        from core_step_sync import _run_step_synced_loop
+
+                        def on_ss_is_sweep(i: int, total: int) -> None:
+                            pct = (i + 1) / total
+                            progress.progress(
+                                pct,
+                                text=f"Step-synced sweep... {i + 1}/{total}",
+                            )
+
+                        _run_step_synced_loop(
+                            instrument, dmm,
+                            config, ss_cfg,
+                            levels, thresholds,
+                            sweep_segments, apply_delay,
+                            channels=channels,
+                            sweep_callback=on_ss_is_sweep,
+                            step_callback=on_ss_is_step,
+                        )
+
+                        logger.info("Step-synced interval sweep cycle %s complete", label)
+                        for ch in channels:
+                            instrument.set_between_cycles_dc_zero(channel=ch)
+                        phase_status.info("Waiting (0V output)...")
+
+                    for ch in channels:
+                        instrument.teardown(channel=ch)
+                    cycle_status.success(f"Step-synced interval sweep complete ({cycle} cycle(s))")
+                    phase_status.empty()
+                    voltage_display.empty()
+                    progress.progress(1.0, text="Done!")
+                    logger.info("Step-synced interval sweep finished (%d cycles)", cycle)
+
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
+                    logger.exception("Error during step-synced interval sweep")
+                finally:
+                    if instrument is not None:
+                        instrument.close()
+                    if dmm is not None:
+                        dmm.close()
 
 # ================================================================== #
 #  Delay Sweep tab
@@ -2339,8 +2849,8 @@ def _build_toml_data() -> dict:
     freq = common_parsed.get("frequency", 10_000_000.0)
     data: dict = {
         "save": {
-            "save_dir": st.session_state.get("_w_save_dir", "configs"),
-            "filename_format": st.session_state.get("_w_filename_format", ""),
+            "save_dir": st.session_state.get("_w_save_dir", _save.get("save_dir", "configs")),
+            "filename_format": st.session_state.get("_w_filename_format", _save.get("filename_format", "")),
         },
         "connection": {
             "visa_address": visa_address,
@@ -2367,15 +2877,16 @@ def _build_toml_data() -> dict:
     for name in ("width_start", "width_stop", "width_step", "wait_time"):
         if name in sweep_parsed:
             ws_data[name] = sweep_parsed[name]
-    ws_data["settling_time"] = float(st.session_state.get("_w_settling_time", 0.0))
-    _tds = int(st.session_state.get("_w_trigger_delay_stop", 0))
+    ws_data["settling_time"] = float(st.session_state.get("_w_settling_time", _ws.get("settling_time", 0.0)))
+    _tds = int(st.session_state.get("_w_trigger_delay_stop", _ws.get("trigger_delay_stop", int(trigger_delay))))
     if _tds != int(trigger_delay):
         ws_data["trigger_delay_stop"] = _tds
-    _de = float(st.session_state.get("_w_delay_exponent", 1.0))
+    _de = float(st.session_state.get("_w_delay_exponent", _ws.get("delay_exponent", 1.0)))
     if _de != 1.0:
         ws_data["delay_exponent"] = _de
     # Delay mode + table
-    _dm = st.session_state.get("_w_delay_mode_radio", "Exponent")
+    _dm = st.session_state.get("_w_delay_mode_radio",
+          "Table" if _ws.get("delay_mode", "exponent") == "table" else "Exponent")
     _dm_val = "exponent" if _dm == "Exponent" else "table"
     if _dm_val != "exponent":
         ws_data["delay_mode"] = _dm_val
@@ -2386,6 +2897,11 @@ def _build_toml_data() -> dict:
                 [parse_si(r["pulse_width"]), float(r["trigger_delay"])]
                 for r in _records
             ]
+    # Sync mode
+    _wsm = st.session_state.get("_w_sync_mode",
+           "Step-Synced" if _ws.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+    if _wsm != "Ramp Detection":
+        ws_data["sync_mode"] = "step_synced" if _wsm == "Step-Synced" else "ramp"
     # Step zones
     if _step_zones:
         ws_data["step_zones"] = [list(row) for row in _step_zones]
@@ -2399,20 +2915,20 @@ def _build_toml_data() -> dict:
     wt = delay_parsed.get("wait_time")
     if wt is not None:
         ds_data["wait_time"] = wt
-    ds_data["delay_start"] = int(st.session_state.get("_w_delay_start", 0))
-    ds_data["delay_stop"] = int(st.session_state.get("_w_delay_stop", 80))
-    ds_data["delay_step"] = int(st.session_state.get("_w_delay_step", 8))
-    ds_data["settling_time"] = float(st.session_state.get("_w_delay_settling_time", 0.0))
+    ds_data["delay_start"] = int(st.session_state.get("_w_delay_start", _ds.get("delay_start", 0)))
+    ds_data["delay_stop"] = int(st.session_state.get("_w_delay_stop", _ds.get("delay_stop", 80)))
+    ds_data["delay_step"] = int(st.session_state.get("_w_delay_step", _ds.get("delay_step", 8)))
+    ds_data["settling_time"] = float(st.session_state.get("_w_delay_settling_time", _ds.get("settling_time", 0.0)))
     data["delay_sweep"] = ds_data
 
     # Pump-Probe section
     pp_data: dict = {}
     try:
-        pp_data["pulse_width"] = parse_si(st.session_state.get("_w_pp_pulse_width", "10n"))
+        pp_data["pulse_width"] = parse_si(st.session_state.get("_w_pp_pulse_width", format_si(_pp.get("pulse_width", 1e-8))))
     except ValueError:
         pp_data["pulse_width"] = 1e-8
     try:
-        pp_data["pulse_interval"] = parse_si(st.session_state.get("_w_pp_pulse_interval", "20n"))
+        pp_data["pulse_interval"] = parse_si(st.session_state.get("_w_pp_pulse_interval", format_si(_pp.get("pulse_interval", 2e-8))))
     except ValueError:
         pp_data["pulse_interval"] = 2e-8
     if st.session_state.get("saved_pp_records"):
@@ -2425,7 +2941,7 @@ def _build_toml_data() -> dict:
     # Interval Sweep section
     isw_data: dict = {}
     try:
-        isw_data["pulse_width"] = parse_si(st.session_state.get("_w_interval_pulse_width", "10n"))
+        isw_data["pulse_width"] = parse_si(st.session_state.get("_w_interval_pulse_width", format_si(_isw.get("pulse_width", 1e-8))))
     except ValueError:
         isw_data["pulse_width"] = 1e-8
     for name, key in [
@@ -2434,18 +2950,20 @@ def _build_toml_data() -> dict:
         ("interval_step", "_w_interval_step"),
         ("wait_time", "_w_interval_wait_time"),
     ]:
+        _isw_fb = format_si(_isw[name]) if name in _isw else ""
         try:
-            isw_data[name] = parse_si(st.session_state.get(key, ""))
+            isw_data[name] = parse_si(st.session_state.get(key, _isw_fb))
         except ValueError:
             pass
-    isw_data["settling_time"] = float(st.session_state.get("_w_interval_settling_time", 0.0))
-    _is_tds = int(st.session_state.get("_w_interval_trigger_delay_stop", 0))
+    isw_data["settling_time"] = float(st.session_state.get("_w_interval_settling_time", _isw.get("settling_time", 0.0)))
+    _is_tds = int(st.session_state.get("_w_interval_trigger_delay_stop", _isw.get("trigger_delay_stop", int(trigger_delay))))
     if _is_tds != int(trigger_delay):
         isw_data["trigger_delay_stop"] = _is_tds
-    _is_de = float(st.session_state.get("_w_interval_delay_exponent", 1.0))
+    _is_de = float(st.session_state.get("_w_interval_delay_exponent", _isw.get("delay_exponent", 1.0)))
     if _is_de != 1.0:
         isw_data["delay_exponent"] = _is_de
-    _is_dm = st.session_state.get("_w_interval_delay_mode_radio", "Exponent")
+    _is_dm = st.session_state.get("_w_interval_delay_mode_radio",
+             "Table" if _isw.get("delay_mode", "exponent") == "table" else "Exponent")
     _is_dm_val = "exponent" if _is_dm == "Exponent" else "table"
     if _is_dm_val != "exponent":
         isw_data["delay_mode"] = _is_dm_val
@@ -2456,18 +2974,47 @@ def _build_toml_data() -> dict:
                 [parse_si(r["pulse_interval"]), float(r["trigger_delay"])]
                 for r in _pp_recs
             ]
+    # Sync mode
+    _ism = st.session_state.get("_is_sync_mode",
+           "Step-Synced" if _isw.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+    if _ism != "Ramp Detection":
+        isw_data["sync_mode"] = "step_synced" if _ism == "Step-Synced" else "ramp"
     if _is_step_zones:
         isw_data["step_zones"] = [list(row) for row in _is_step_zones]
     data["interval_sweep"] = isw_data
 
     # Integration (Auto Sweep)
     data["integration"] = {
-        "dmm_visa_address": st.session_state.get("_w_ig_dmm_address", DEFAULT_34401A_ADDRESS),
-        "trigger_start_voltage": float(st.session_state.get("_w_ig_trigger_start", -9.8)),
-        "trigger_end_voltage": float(st.session_state.get("_w_ig_trigger_end", -9.2)),
-        "sweep_start_voltage": float(st.session_state.get("_w_ig_sweep_start", -9.0)),
-        "poll_interval": float(st.session_state.get("_w_ig_poll_interval", 1.0)),
-        "num_cycles": int(st.session_state.get("_w_ig_num_cycles", 0)),
+        "dmm_visa_address": st.session_state.get("_w_ig_dmm_address", _ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS)),
+        "trigger_start_voltage": float(st.session_state.get("_w_ig_trigger_start", _ig.get("trigger_start_voltage", -9.8))),
+        "trigger_end_voltage": float(st.session_state.get("_w_ig_trigger_end", _ig.get("trigger_end_voltage", -9.2))),
+        "sweep_start_voltage": float(st.session_state.get("_w_ig_sweep_start", _ig.get("sweep_start_voltage", -9.0))),
+        "poll_interval": float(st.session_state.get("_w_ig_poll_interval", _ig.get("poll_interval", 1.0))),
+        "num_cycles": int(st.session_state.get("_w_ig_num_cycles", _ig.get("num_cycles", 0))),
+    }
+
+    # Step-Sync settings
+    # Step-Sync settings (prefer width sweep tab keys, fall back to interval sweep tab)
+    def _ss_val(key: str, default):  # noqa: ANN001
+        return st.session_state.get(f"_w_ss_{key}",
+               st.session_state.get(f"_is_ss_{key}", _ss.get(key, default)))
+
+    data["step_sync"] = {
+        "dmm_visa_address": st.session_state.get("_w_ig_dmm_address",
+                            st.session_state.get("_w_is_ig_dmm_address",
+                            _ss.get("dmm_visa_address", DEFAULT_34401A_ADDRESS))),
+        "total_steps": int(_ss_val("total_steps", 30)),
+        "sweep_start_step": int(_ss_val("sweep_start_step", 10)),
+        "v_start": float(_ss_val("v_start", -10.0)),
+        "v_stop": float(_ss_val("v_stop", 10.0)),
+        "poll_interval": float(_ss_val("poll_interval", 0.1)),
+        "confirm_reads": int(_ss_val("confirm_reads", 2)),
+        "step_timeout": float(_ss_val("step_timeout", 10.0)),
+        "num_cycles": int(st.session_state.get("_w_ig_num_cycles",
+                          st.session_state.get("_w_is_ig_num_cycles",
+                          _ss.get("num_cycles", 0)))),
+        "restart_voltage": float(_ss_val("restart_voltage", -9.5)),
+        "restart_timeout": float(_ss_val("restart_timeout", 60.0)),
     }
 
     return data
