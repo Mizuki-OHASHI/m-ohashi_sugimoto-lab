@@ -2958,6 +2958,14 @@ with tab_delay:
 #  Sidebar: unified TOML save (after all tabs are built)
 # ================================================================== #
 
+def _safe_parse_si(key: str, fallback: float) -> float:
+    """Read a SI-formatted session state value, returning fallback on error."""
+    try:
+        return parse_si(st.session_state.get(key, format_si(fallback)))
+    except (ValueError, KeyError):
+        return fallback
+
+
 def _build_toml_data() -> dict:
     """Build unified TOML dict from current widget state."""
     freq = common_parsed.get("frequency", 10_000_000.0)
@@ -2978,7 +2986,7 @@ def _build_toml_data() -> dict:
             "resolution_n": int(resolution_n),
         },
         "simple_pulse": {
-            "pulse_width": pulse_width_val if pulse_width_val is not None else 1e-8,
+            "pulse_width": _safe_parse_si("_w_pulse_width", _sp.get("pulse_width", 1e-8)),
             **({"saved_records": [
                 [parse_si(r["pulse_width"]), float(r["trigger_delay"])]
                 for r in st.session_state.get("saved_pulse_records", [])
@@ -2988,9 +2996,16 @@ def _build_toml_data() -> dict:
 
     # Width Sweep section
     ws_data: dict = {}
-    for name in ("width_start", "width_stop", "width_step", "wait_time"):
-        if name in sweep_parsed:
-            ws_data[name] = sweep_parsed[name]
+    for name, key in (
+        ("width_start", "_w_width_start"),
+        ("width_stop", "_w_width_stop"),
+        ("width_step", "_w_width_step"),
+        ("wait_time", "_w_wait_time"),
+    ):
+        try:
+            ws_data[name] = parse_si(st.session_state.get(key, format_si(_ws.get(name, 0))))
+        except ValueError:
+            pass
     ws_data["settling_time"] = float(st.session_state.get("_w_settling_time", _ws.get("settling_time", 0.0)))
     _tds = int(st.session_state.get("_w_trigger_delay_stop", _ws.get("trigger_delay_stop", int(trigger_delay))))
     if _tds != int(trigger_delay):
@@ -3016,19 +3031,31 @@ def _build_toml_data() -> dict:
            "Step-Synced" if _ws.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
     if _wsm != "Ramp Detection":
         ws_data["sync_mode"] = "step_synced" if _wsm == "Step-Synced" else "ramp"
-    # Step zones
-    if _step_zones:
-        ws_data["step_zones"] = [list(row) for row in _step_zones]
+    # Step zones (rebuild from session state to avoid NameError)
+    if st.session_state.get("_w_variable_step", False):
+        _sz_save: list[list[float]] = []
+        for _zn in ("zone1", "zone2"):
+            _b = st.session_state.get(f"_w_step_{_zn}_boundary", "").strip()
+            _s = st.session_state.get(f"_w_step_{_zn}_step", "").strip()
+            if _b and _s:
+                try:
+                    _sz_save.append([parse_si(_b), parse_si(_s)])
+                except ValueError:
+                    pass
+        if _sz_save:
+            ws_data["step_zones"] = _sz_save
     data["width_sweep"] = ws_data
 
     # Delay Sweep section
     ds_data: dict = {}
-    pw = delay_parsed.get("pulse_width")
-    if pw is not None:
-        ds_data["pulse_width"] = pw
-    wt = delay_parsed.get("wait_time")
-    if wt is not None:
-        ds_data["wait_time"] = wt
+    try:
+        ds_data["pulse_width"] = parse_si(st.session_state.get("_w_delay_pulse_width", format_si(_ds.get("pulse_width", 1e-8))))
+    except ValueError:
+        pass
+    try:
+        ds_data["wait_time"] = parse_si(st.session_state.get("_w_delay_wait_time", format_si(_ds.get("wait_time", 1.0))))
+    except ValueError:
+        pass
     ds_data["delay_start"] = int(st.session_state.get("_w_delay_start", _ds.get("delay_start", 0)))
     ds_data["delay_stop"] = int(st.session_state.get("_w_delay_stop", _ds.get("delay_stop", 80)))
     ds_data["delay_step"] = int(st.session_state.get("_w_delay_step", _ds.get("delay_step", 8)))
@@ -3093,8 +3120,19 @@ def _build_toml_data() -> dict:
            "Step-Synced" if _isw.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
     if _ism != "Ramp Detection":
         isw_data["sync_mode"] = "step_synced" if _ism == "Step-Synced" else "ramp"
-    if _is_step_zones:
-        isw_data["step_zones"] = [list(row) for row in _is_step_zones]
+    # Interval sweep step zones (rebuild from session state)
+    if st.session_state.get("_w_interval_variable_step", False):
+        _isz_save: list[list[float]] = []
+        for _zn in ("zone1", "zone2"):
+            _b = st.session_state.get(f"_w_interval_step_{_zn}_boundary", "").strip()
+            _s = st.session_state.get(f"_w_interval_step_{_zn}_step", "").strip()
+            if _b and _s:
+                try:
+                    _isz_save.append([parse_si(_b), parse_si(_s)])
+                except ValueError:
+                    pass
+        if _isz_save:
+            isw_data["step_zones"] = _isz_save
     data["interval_sweep"] = isw_data
 
     # Integration (Auto Sweep)

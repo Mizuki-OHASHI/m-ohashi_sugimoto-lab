@@ -255,6 +255,8 @@ class PulseInstrument:
         w = self._write
 
         w(f":INST CH{channel}")
+        # Turn off output before reconfiguration to prevent glitches
+        w(":OUTPut OFF")
         # Switch to USER mode first (81180A requires this before trace operations)
         w(":FUNC:MODE USER")
         # Clear existing segments to avoid conflicts
@@ -317,6 +319,8 @@ class PulseInstrument:
         w = self._write
 
         w(f":INST CH{channel}")
+        # Turn off output before reconfiguration to prevent glitches
+        w(":OUTPut OFF")
         w(":FUNC:MODE USER")
         w(":TRAC:DEL:ALL")
 

@@ -1,0 +1,61 @@
+[save]
+save_dir = "configs"
+filename_format = "pulse_control_20260216_"
+
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"
+
+[common]
+v_on = 0.13
+v_off = 2.13
+frequency = 10000000.0
+period = 1e-7
+trigger_delay = 3352
+resolution_n = 1
+
+[simple_pulse]
+pulse_width = 1e-8
+
+[width_sweep]
+width_start = 1e-8
+width_stop = 5.0000000000000004e-8
+width_step = 5e-9
+wait_time = 1.6
+settling_time = 2.0
+
+[delay_sweep]
+pulse_width = 1e-8
+wait_time = 0.001
+delay_start = 0
+delay_stop = 12800
+delay_step = 16
+settling_time = 2.0
+
+[pump_probe]
+pulse_width = 1e-8
+pulse_interval = 2e-8
+
+[interval_sweep]
+pulse_width = 1e-8
+settling_time = 0.0
+
+[integration]
+dmm_visa_address = "ASRL3::INSTR"
+trigger_start_voltage = -9.8
+trigger_end_voltage = -9.2
+sweep_start_voltage = -9.0
+poll_interval = 1.0
+num_cycles = 0
+
+[step_sync]
+dmm_visa_address = "ASRL3::INSTR"
+total_steps = 30
+sweep_start_step = 10
+v_start = -10.0
+v_stop = 10.0
+poll_interval = 0.1
+confirm_reads = 2
+step_timeout = 10.0
+num_cycles = 0
+restart_voltage = -9.5
+restart_timeout = 60.0
