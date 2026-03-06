@@ -223,47 +223,49 @@ def _on_period_change() -> None:
 def _load_config_to_widgets(data: dict) -> None:
     """Push unified TOML data into widget session state.
 
-    Instead of setting each widget key directly (which conflicts with the
-    widget's ``value=`` / ``index=`` parameter), we update ``unified_config``
-    and **clear** all widget keys.  A subsequent ``st.rerun()`` at the call
-    site causes the script to re-evaluate ``_common``, ``_ws``, etc. from the
-    new ``unified_config``, and every widget re-initialises from its own
-    ``value=`` / ``index=`` parameter — no Session State API conflict.
+    Each widget key is set directly so that the widget picks up the new value
+    on the next rerun.  Widgets must NOT have ``value=`` / ``index=``
+    parameters; instead, ``setdefault()`` is used before each widget for
+    first-run initialisation.
     """
     st.session_state.unified_config = data
 
-    # Clear every widget key so widgets fall back to value=/index= on the
-    # next rerun.  Preserve non-widget runtime state (e.g. live connection).
-    _keep = {"_w_live_connection"}
-    for k in list(st.session_state.keys()):
-        if (k.startswith("_w_") or k.startswith("_is_")) and k not in _keep:
-            del st.session_state[k]
-
-    # Radio widgets ignore index= for already-rendered widgets (frontend
-    # caches their value).  Set their keys directly after clearing.
-    ws = data.get("width_sweep", {})
-    isw = data.get("interval_sweep", {})
-    st.session_state["_w_delay_mode_radio"] = (
-        "Table" if ws.get("delay_mode", "exponent") == "table" else "Exponent")
-    st.session_state["_w_interval_delay_mode_radio"] = (
-        "Table" if isw.get("delay_mode", "exponent") == "table" else "Exponent")
-    st.session_state["_w_sync_mode"] = (
-        "Step-Synced" if ws.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
-    st.session_state["_is_sync_mode"] = (
-        "Step-Synced" if isw.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
-
-    # Restore non-widget state that cannot be derived from unified_config
-    # via a simple value= parameter (requires format_si conversion).
+    save = data.get("save", {})
+    conn = data.get("connection", {})
+    common = data.get("common", {})
     sp = data.get("simple_pulse", {})
     ws = data.get("width_sweep", {})
+    ds = data.get("delay_sweep", {})
+    pp = data.get("pump_probe", {})
+    isw = data.get("interval_sweep", {})
+    ig = data.get("integration", {})
+    ss = data.get("step_sync", {})
+
+    # Save settings
+    st.session_state._w_save_dir = save.get("save_dir", "configs")
+    st.session_state._w_filename_format = save.get("filename_format", "")
+
+    # Connection
+    st.session_state._w_visa_address = conn.get("visa_address", DEFAULT_VISA_ADDRESS)
+
+    # Common
+    st.session_state._w_v_on = common.get("v_on", 0.0)
+    st.session_state._w_v_off = common.get("v_off", -1.0)
+    freq = common.get("frequency", 10_000_000.0)
+    st.session_state._w_freq = format_si(freq)
+    if freq > 0:
+        st.session_state._w_period = format_si(1.0 / freq)
+    st.session_state._w_trigger_delay = common.get("trigger_delay", 0)
+    st.session_state._w_resolution_n = common.get("resolution_n", 1)
+
+    # Simple Pulse
+    st.session_state._w_pulse_width = format_si(sp.get("pulse_width", 1e-8))
+
+    # saved_pulse_records (non-widget state)
     _saved = sp.get("saved_records") or ws.get("delay_table")
     if _saved is not None:
         st.session_state.saved_pulse_records = [
-            {
-                "timestamp": "",
-                "pulse_width": format_si(row[0]),
-                "trigger_delay": int(row[1]),
-            }
+            {"timestamp": "", "pulse_width": format_si(row[0]), "trigger_delay": int(row[1])}
             for row in _saved
         ]
     elif not st.session_state.get("saved_pulse_records"):
@@ -271,21 +273,121 @@ def _load_config_to_widgets(data: dict) -> None:
         if _csv_records:
             st.session_state.saved_pulse_records = _csv_records
 
-    pp = data.get("pump_probe", {})
-    _pp_saved = pp.get("saved_records") or data.get("interval_sweep", {}).get("delay_table")
+    # Width Sweep
+    st.session_state._w_width_start = format_si(ws.get("width_start", 1e-8))
+    st.session_state._w_width_stop = format_si(ws.get("width_stop", 5e-8))
+    st.session_state._w_width_step = format_si(ws.get("width_step", 5e-9))
+    st.session_state._w_wait_time = format_si(ws.get("wait_time", 1.0))
+    st.session_state._w_settling_time = ws.get("settling_time", 0.0)
+    td_stop = ws.get("trigger_delay_stop")
+    st.session_state._w_trigger_delay_stop = (
+        td_stop if td_stop is not None else common.get("trigger_delay", 0)
+    )
+    st.session_state._w_delay_exponent = ws.get("delay_exponent", 1.0)
+    _dm = ws.get("delay_mode", "exponent")
+    st.session_state._w_delay_mode_radio = "Exponent" if _dm == "exponent" else "Table"
+    _sz = ws.get("step_zones", [])
+    st.session_state._w_variable_step = bool(_sz)
+    if _sz:
+        z1 = _sz[0] if len(_sz) >= 1 else [None, None]
+        st.session_state._w_step_zone1_boundary = format_si(z1[0]) if z1[0] is not None else ""
+        st.session_state._w_step_zone1_step = format_si(z1[1]) if z1[1] is not None else ""
+        z2 = _sz[1] if len(_sz) >= 2 else [None, None]
+        st.session_state._w_step_zone2_boundary = format_si(z2[0]) if z2[0] is not None else ""
+        st.session_state._w_step_zone2_step = format_si(z2[1]) if z2[1] is not None else ""
+    st.session_state._w_sync_mode = (
+        "Step-Synced" if ws.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+
+    # Integration (Auto Sweep)
+    st.session_state._w_ig_dmm_address = ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS)
+    st.session_state._w_ig_trigger_start = ig.get("trigger_start_voltage", -9.8)
+    st.session_state._w_ig_trigger_end = ig.get("trigger_end_voltage", -9.2)
+    st.session_state._w_ig_sweep_start = ig.get("sweep_start_voltage", -9.0)
+    st.session_state._w_ig_poll_interval = ig.get("poll_interval", 1.0)
+    st.session_state._w_ig_num_cycles = ig.get("num_cycles", 0)
+
+    # Step-Sync
+    st.session_state._w_ss_total_steps = int(ss.get("total_steps", 30))
+    st.session_state._w_ss_sweep_start_step = int(ss.get("sweep_start_step", 10))
+    st.session_state._w_ss_confirm_reads = int(ss.get("confirm_reads", 2))
+    st.session_state._w_ss_v_start = ss.get("v_start", -10.0)
+    st.session_state._w_ss_v_stop = ss.get("v_stop", 10.0)
+    st.session_state._w_ss_poll_interval = ss.get("poll_interval", 0.1)
+    st.session_state._w_ss_step_timeout = ss.get("step_timeout", 10.0)
+    st.session_state._w_ss_restart_voltage = ss.get("restart_voltage", -9.5)
+    st.session_state._w_ss_restart_timeout = ss.get("restart_timeout", 60.0)
+
+    # Delay Sweep
+    st.session_state._w_delay_pulse_width = format_si(ds.get("pulse_width", 1e-8))
+    st.session_state._w_delay_start = ds.get("delay_start", 0)
+    st.session_state._w_delay_stop = ds.get("delay_stop", 80)
+    st.session_state._w_delay_step = ds.get("delay_step", 8)
+    st.session_state._w_delay_wait_time = format_si(ds.get("wait_time", 1.0))
+    st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
+
+    # Pump-Probe
+    st.session_state._w_pp_pulse_width = format_si(pp.get("pulse_width", 1e-8))
+    st.session_state._w_pp_pulse_interval = format_si(pp.get("pulse_interval", 2e-8))
+
+    # saved_pp_records (non-widget state)
+    _pp_saved = pp.get("saved_records") or isw.get("delay_table")
     if _pp_saved is not None:
         st.session_state.saved_pp_records = [
-            {
-                "timestamp": "",
-                "pulse_interval": format_si(row[0]),
-                "trigger_delay": int(row[1]),
-            }
+            {"timestamp": "", "pulse_interval": format_si(row[0]), "trigger_delay": int(row[1])}
             for row in _pp_saved
         ]
     elif not st.session_state.get("saved_pp_records"):
         _pp_csv = _load_pp_records_from_csv()
         if _pp_csv:
             st.session_state.saved_pp_records = _pp_csv
+
+    # Interval Sweep
+    st.session_state._w_interval_pulse_width = format_si(isw.get("pulse_width", 1e-8))
+    st.session_state._w_interval_start = format_si(isw.get("interval_start", 1e-8))
+    st.session_state._w_interval_stop = format_si(isw.get("interval_stop", 5e-8))
+    st.session_state._w_interval_step = format_si(isw.get("interval_step", 5e-9))
+    st.session_state._w_interval_wait_time = format_si(isw.get("wait_time", 1.0))
+    st.session_state._w_interval_settling_time = isw.get("settling_time", 0.0)
+    td_stop_isw = isw.get("trigger_delay_stop")
+    st.session_state._w_interval_trigger_delay_stop = (
+        td_stop_isw if td_stop_isw is not None else common.get("trigger_delay", 0)
+    )
+    st.session_state._w_interval_delay_exponent = isw.get("delay_exponent", 1.0)
+    _dm_isw = isw.get("delay_mode", "exponent")
+    st.session_state._w_interval_delay_mode_radio = (
+        "Exponent" if _dm_isw == "exponent" else "Table")
+    _isz = isw.get("step_zones", [])
+    st.session_state._w_interval_variable_step = bool(_isz)
+    if _isz:
+        z1 = _isz[0] if len(_isz) >= 1 else [None, None]
+        st.session_state._w_interval_step_zone1_boundary = (
+            format_si(z1[0]) if z1[0] is not None else "")
+        st.session_state._w_interval_step_zone1_step = (
+            format_si(z1[1]) if z1[1] is not None else "")
+        z2 = _isz[1] if len(_isz) >= 2 else [None, None]
+        st.session_state._w_interval_step_zone2_boundary = (
+            format_si(z2[0]) if z2[0] is not None else "")
+        st.session_state._w_interval_step_zone2_step = (
+            format_si(z2[1]) if z2[1] is not None else "")
+    st.session_state._is_sync_mode = (
+        "Step-Synced" if isw.get("sync_mode", "ramp") == "step_synced" else "Ramp Detection")
+
+    # Interval Sweep - Integration / Step-Sync (duplicated widgets)
+    st.session_state._w_is_ig_dmm_address = ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS)
+    st.session_state._w_is_ig_poll_interval = ig.get("poll_interval", 1.0)
+    st.session_state._w_is_ig_num_cycles = ig.get("num_cycles", 0)
+    st.session_state._w_is_ig_trigger_start = ig.get("trigger_start_voltage", -9.8)
+    st.session_state._w_is_ig_trigger_end = ig.get("trigger_end_voltage", -9.2)
+    st.session_state._w_is_ig_sweep_start = ig.get("sweep_start_voltage", -9.0)
+    st.session_state._is_ss_total_steps = int(ss.get("total_steps", 30))
+    st.session_state._is_ss_sweep_start_step = int(ss.get("sweep_start_step", 10))
+    st.session_state._is_ss_confirm_reads = int(ss.get("confirm_reads", 2))
+    st.session_state._is_ss_v_start = ss.get("v_start", -10.0)
+    st.session_state._is_ss_v_stop = ss.get("v_stop", 10.0)
+    st.session_state._is_ss_poll_interval = ss.get("poll_interval", 0.1)
+    st.session_state._is_ss_step_timeout = ss.get("step_timeout", 10.0)
+    st.session_state._is_ss_restart_voltage = ss.get("restart_voltage", -9.5)
+    st.session_state._is_ss_restart_timeout = ss.get("restart_timeout", 60.0)
 
 
 # Process pending import BEFORE any widgets are instantiated
@@ -405,9 +507,9 @@ with st.sidebar:
     st.caption("Agilent 81180A AWG")
 
     st.subheader("Connection")
+    st.session_state.setdefault("_w_visa_address", _conn.get("visa_address", DEFAULT_VISA_ADDRESS))
     visa_address = st.text_input(
         "VISA Address",
-        value=_conn.get("visa_address", DEFAULT_VISA_ADDRESS),
         key="_w_visa_address",
     )
 
@@ -453,14 +555,14 @@ with st.sidebar:
     st.subheader("TOML Config")
 
     with st.expander("Settings / Import"):
+        st.session_state.setdefault("_w_save_dir", _save.get("save_dir", "configs"))
         st.text_input(
             "Save Directory",
-            value=_save.get("save_dir", "configs"),
             key="_w_save_dir",
         )
+        st.session_state.setdefault("_w_filename_format", _save.get("filename_format", "pulse_control_"))
         st.text_input(
             "Filename Format",
-            value=_save.get("filename_format", "pulse_control_"),
             key="_w_filename_format",
         )
 
@@ -490,42 +592,46 @@ with col_left:
     st.text("Voltage Levels and Timing")
     col_volt_left, col_volt_right = st.columns(2) 
     with col_volt_left:
+        st.session_state.setdefault("_w_v_on", _common.get("v_on", 0.0))
         v_on = st.number_input(
-            "V_on [V]", value=_common.get("v_on", 0.0), format="%.4f", key="_w_v_on",
+            "V_on [V]", format="%.4f", key="_w_v_on",
         )
     with col_volt_right:
+        st.session_state.setdefault("_w_v_off", _common.get("v_off", -1.0))
         v_off = st.number_input(
-            "V_off [V]", value=_common.get("v_off", -1.0), format="%.4f", key="_w_v_off",
+            "V_off [V]", format="%.4f", key="_w_v_off",
         )
     freq_col, period_col = st.columns(2)
     with freq_col:
+        st.session_state.setdefault("_w_freq", format_si(_common.get("frequency", 10_000_000.0)))
         st.text_input(
             "Frequency [Hz]",
-            value=format_si(_common.get("frequency", 10_000_000.0)),
             key="_w_freq",
             on_change=_on_freq_change,
         )
     with period_col:
         _freq_default = _common.get("frequency", 10_000_000.0)
+        st.session_state.setdefault("_w_period", format_si(1.0 / _freq_default) if _freq_default > 0 else "0")
         st.text_input(
             "Period [s]",
-            value=format_si(1.0 / _freq_default) if _freq_default > 0 else "0",
             key="_w_period",
             on_change=_on_period_change,
         )
 
 with col_right:
     st.text("Trigger Delay")
+    st.session_state.setdefault("_w_trigger_delay", _common.get("trigger_delay", 0))
     trigger_delay = st.number_input(
         "Trigger Delay [points] (multiple of 8)",
-        value=_common.get("trigger_delay", 0), min_value=0, step=8,
+        min_value=0, step=8,
         key="_w_trigger_delay",
     )
     col_res_n, col_res_val = st.columns(2)
     with col_res_n:
+        st.session_state.setdefault("_w_resolution_n", _common.get("resolution_n", 1))
         resolution_n = st.number_input(
             "Delay Resolution (×n)",
-            value=_common.get("resolution_n", 1), min_value=1, step=1,
+            min_value=1, step=1,
             help="Multiplier for points_per_period. Higher = finer delay resolution.",
             key="_w_resolution_n",
         )
@@ -583,9 +689,9 @@ with tab_pulse:
         _pulse_left, _pulse_right = st.columns([2, 1])
 
         with _pulse_left:
+            st.session_state.setdefault("_w_pulse_width", format_si(_sp.get("pulse_width", 1e-8)))
             st.text_input(
                 "Pulse Width [s]",
-                value=format_si(_sp.get("pulse_width", 1e-8)),
                 key="_w_pulse_width",
             )
             pulse_waveform_mode = "arbitrary"
@@ -807,14 +913,14 @@ with tab_pp:
         _pp_left, _pp_right = st.columns([2, 1])
 
         with _pp_left:
+            st.session_state.setdefault("_w_pp_pulse_width", format_si(_pp.get("pulse_width", 1e-8)))
             st.text_input(
                 "Pulse Width [s]",
-                value=format_si(_pp.get("pulse_width", 1e-8)),
                 key="_w_pp_pulse_width",
             )
+            st.session_state.setdefault("_w_pp_pulse_interval", format_si(_pp.get("pulse_interval", 2e-8)))
             st.text_input(
                 "Pulse Interval [s]",
-                value=format_si(_pp.get("pulse_interval", 2e-8)),
                 key="_w_pp_pulse_interval",
             )
 
@@ -1040,25 +1146,25 @@ with tab_sweep:
         col_range, col_timing, col_opts = st.columns(3)
 
         with col_range:
+            st.session_state.setdefault("_w_width_start", format_si(_ws.get("width_start", 1e-8)))
             st.text_input(
                 "Width Start [s]",
-                value=format_si(_ws.get("width_start", 1e-8)),
                 key="_w_width_start",
             )
+            st.session_state.setdefault("_w_width_stop", format_si(_ws.get("width_stop", 5e-8)))
             st.text_input(
                 "Width Stop [s]",
-                value=format_si(_ws.get("width_stop", 5e-8)),
                 key="_w_width_stop",
             )
+            st.session_state.setdefault("_w_width_step", format_si(_ws.get("width_step", 5e-9)))
             st.text_input(
                 "Width Step [s]",
-                value=format_si(_ws.get("width_step", 5e-9)),
                 key="_w_width_step",
                 help="Default step (or step for last zone when variable step is enabled)",
             )
-            _var_step_default = bool(_ws.get("step_zones"))
+            st.session_state.setdefault("_w_variable_step", bool(_ws.get("step_zones")))
             variable_step = st.checkbox(
-                "Variable step size", value=_var_step_default, key="_w_variable_step",
+                "Variable step size", key="_w_variable_step",
             )
             if variable_step:
                 _sz = _ws.get("step_zones", [])
@@ -1078,42 +1184,43 @@ with tab_sweep:
                 with st.expander(_exp_title, expanded=True):
                     _zc1, _zc2 = st.columns(2)
                     with _zc1:
+                        st.session_state.setdefault("_w_step_zone1_boundary", format_si(_z1[0]) if _z1[0] is not None else "")
                         st.text_input(
                             "Zone 1: width ≤ [s]",
-                            value=format_si(_z1[0]) if _z1[0] is not None else "",
                             key="_w_step_zone1_boundary",
                         )
                     with _zc2:
+                        st.session_state.setdefault("_w_step_zone1_step", format_si(_z1[1]) if _z1[1] is not None else "")
                         st.text_input(
                             "Zone 1 step [s]",
-                            value=format_si(_z1[1]) if _z1[1] is not None else "",
                             key="_w_step_zone1_step",
                         )
                     _zc3, _zc4 = st.columns(2)
                     with _zc3:
+                        st.session_state.setdefault("_w_step_zone2_boundary", format_si(_z2[0]) if _z2[0] is not None else "")
                         st.text_input(
                             "Zone 2: width ≤ [s]",
-                            value=format_si(_z2[0]) if _z2[0] is not None else "",
                             key="_w_step_zone2_boundary",
                             help="Leave blank if only 1 zone boundary needed",
                         )
                     with _zc4:
+                        st.session_state.setdefault("_w_step_zone2_step", format_si(_z2[1]) if _z2[1] is not None else "")
                         st.text_input(
                             "Zone 2 step [s]",
-                            value=format_si(_z2[1]) if _z2[1] is not None else "",
                             key="_w_step_zone2_step",
                         )
                     st.caption("Above last boundary → uses Width Step as default step")
 
         with col_timing:
+            st.session_state.setdefault("_w_wait_time", format_si(_ws.get("wait_time", 1.0)))
             st.text_input(
                 "Wait Time [s]",
-                value=format_si(_ws.get("wait_time", 1.0)),
                 key="_w_wait_time",
             )
+            st.session_state.setdefault("_w_settling_time", _ws.get("settling_time", 0.0))
             sweep_settling_time = st.number_input(
                 "Settling Time [s]",
-                value=_ws.get("settling_time", 0.0), min_value=0.0, step=1.0, format="%.1f",
+                min_value=0.0, step=1.0, format="%.1f",
                 help="Wait time before sweep starts (for DUT to reach steady state)",
                 key="_w_settling_time",
             )
@@ -1132,17 +1239,17 @@ with tab_sweep:
             _delay_mode_val = "exponent" if delay_mode == "Exponent" else "table"
 
             if _delay_mode_val == "exponent":
+                st.session_state.setdefault("_w_trigger_delay_stop", _ws.get("trigger_delay_stop", _common.get("trigger_delay", 0)))
                 sweep_trigger_delay_stop = st.number_input(
                     "Trigger Delay Stop [points] (×8)",
-                    value=_ws.get("trigger_delay_stop", _common.get("trigger_delay", 0)),
                     min_value=0, step=8,
                     help="End value for trigger delay sweep. "
                          "Set equal to Trigger Delay for fixed delay.",
                     key="_w_trigger_delay_stop",
                 )
+                st.session_state.setdefault("_w_delay_exponent", _ws.get("delay_exponent", 1.0))
                 delay_exponent = st.number_input(
                     "Delay Exponent",
-                    value=_ws.get("delay_exponent", 1.0),
                     min_value=-4.0, max_value=4.0, step=0.25, format="%.2f",
                     help="delay = a × pw^n + b (1=linear, -1=1/pw)",
                     key="_w_delay_exponent",
@@ -1341,9 +1448,9 @@ with tab_sweep:
 
         with ig_mode_col:
             with st.expander(f"DMM Settings ({_ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS)})", expanded=False):
+                st.session_state.setdefault("_w_ig_dmm_address", _ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS))
                 st.text_input(
                     "DMM VISA Address",
-                    value=_ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS),
                     key="_w_ig_dmm_address",
                 )
                 _dmm_btn_col1, _dmm_btn_col2 = st.columns(2)
@@ -1375,9 +1482,9 @@ with tab_sweep:
             _cc1, _cc2 = st.columns(2)
             with _cc1:
                 if w_sync_mode == "Ramp Detection":
+                    st.session_state.setdefault("_w_ig_poll_interval", _ig.get("poll_interval", 1.0))
                     ig_poll_interval = st.number_input(
                         "Poll Interval [s]",
-                        value=_ig.get("poll_interval", 1.0),
                         min_value=0.1, step=0.5, format="%.1f",
                         key="_w_ig_poll_interval",
                         help="Interval between DMM voltage readings.",
@@ -1385,9 +1492,10 @@ with tab_sweep:
                 else:
                     ig_poll_interval = _ig.get("poll_interval", 1.0)
             with _cc2:
+                st.session_state.setdefault("_w_ig_num_cycles",
+                    _ig.get("num_cycles", 0) if w_sync_mode == "Ramp Detection" else _ss.get("num_cycles", 0))
                 ig_num_cycles = st.number_input(
                     "Cycles (0 = infinite)",
-                    value=_ig.get("num_cycles", 0) if w_sync_mode == "Ramp Detection" else _ss.get("num_cycles", 0),
                     min_value=0, step=1,
                     key="_w_ig_num_cycles",
                     help="Number of detect-then-sweep cycles. Set 0 for infinite loop (stop by reloading the page).",
@@ -1397,25 +1505,25 @@ with tab_sweep:
             # Ramp detection parameters
             _r1, _r2, _r3 = st.columns(3)
             with _r1:
+                st.session_state.setdefault("_w_ig_trigger_start", _ig.get("trigger_start_voltage", -9.8))
                 ig_trigger_start = st.number_input(
                     "Trigger Start [V]",
-                    value=_ig.get("trigger_start_voltage", -9.8),
                     format="%.2f",
                     key="_w_ig_trigger_start",
                     help="Start collecting fit data when voltage crosses this value upward.",
                 )
             with _r2:
+                st.session_state.setdefault("_w_ig_trigger_end", _ig.get("trigger_end_voltage", -9.2))
                 ig_trigger_end = st.number_input(
                     "Trigger End [V]",
-                    value=_ig.get("trigger_end_voltage", -9.2),
                     format="%.2f",
                     key="_w_ig_trigger_end",
                     help="Stop collecting and perform linear fit at this voltage.",
                 )
             with _r3:
+                st.session_state.setdefault("_w_ig_sweep_start", _ig.get("sweep_start_voltage", -9.0))
                 ig_sweep_start = st.number_input(
                     "Sweep Start [V]",
-                    value=_ig.get("sweep_start_voltage", -9.0),
                     format="%.2f",
                     key="_w_ig_sweep_start",
                     help="Predicted voltage at which the sweep begins.",
@@ -1613,25 +1721,25 @@ with tab_sweep:
             # Step-sync parameters
             _ss1, _ss2, _ss3 = st.columns(3)
             with _ss1:
+                st.session_state.setdefault("_w_ss_total_steps", int(_ss.get("total_steps", 30)))
                 ss_total_steps = st.number_input(
                     "Total Steps (N)",
-                    value=int(_ss.get("total_steps", 30)),
                     min_value=2, step=1,
                     key="_w_ss_total_steps",
                     help="Total number of discrete voltage levels in the external step function.",
                 )
             with _ss2:
+                st.session_state.setdefault("_w_ss_sweep_start_step", int(_ss.get("sweep_start_step", 10)))
                 ss_sweep_start_step = st.number_input(
                     "Sweep Start Step",
-                    value=int(_ss.get("sweep_start_step", 10)),
                     min_value=0, step=1,
                     key="_w_ss_sweep_start_step",
                     help="0-based index where AWG sweep begins. Steps before this are monitoring-only.",
                 )
             with _ss3:
+                st.session_state.setdefault("_w_ss_confirm_reads", int(_ss.get("confirm_reads", 2)))
                 ss_confirm_reads = st.number_input(
                     "Confirm Reads",
-                    value=int(_ss.get("confirm_reads", 2)),
                     min_value=1, step=1,
                     key="_w_ss_confirm_reads",
                     help="Consecutive DMM reads above threshold to confirm a step transition.",
@@ -1639,33 +1747,33 @@ with tab_sweep:
 
             _ss4, _ss5, _ss6, _ss7 = st.columns(4)
             with _ss4:
+                st.session_state.setdefault("_w_ss_v_start", _ss.get("v_start", -10.0))
                 ss_v_start = st.number_input(
                     "V Start [V]",
-                    value=_ss.get("v_start", -10.0),
                     format="%.1f",
                     key="_w_ss_v_start",
                     help="Voltage at step 0.",
                 )
             with _ss5:
+                st.session_state.setdefault("_w_ss_v_stop", _ss.get("v_stop", 10.0))
                 ss_v_stop = st.number_input(
                     "V Stop [V]",
-                    value=_ss.get("v_stop", 10.0),
                     format="%.1f",
                     key="_w_ss_v_stop",
                     help="Voltage at step N-1.",
                 )
             with _ss6:
+                st.session_state.setdefault("_w_ss_poll_interval", _ss.get("poll_interval", 0.1))
                 ss_poll_interval = st.number_input(
                     "Poll Interval [s]",
-                    value=_ss.get("poll_interval", 0.1),
                     min_value=0.01, step=0.05, format="%.2f",
                     key="_w_ss_poll_interval",
                     help="Interval between DMM voltage reads.",
                 )
             with _ss7:
+                st.session_state.setdefault("_w_ss_step_timeout", _ss.get("step_timeout", 10.0))
                 ss_step_timeout = st.number_input(
                     "Step Timeout [s]",
-                    value=_ss.get("step_timeout", 10.0),
                     min_value=0.1, step=1.0, format="%.1f",
                     key="_w_ss_step_timeout",
                     help="Max seconds to wait for a single step transition.",
@@ -1674,17 +1782,17 @@ with tab_sweep:
             with st.expander("Restart Settings", expanded=False):
                 _rs1, _rs2 = st.columns(2)
                 with _rs1:
+                    st.session_state.setdefault("_w_ss_restart_voltage", _ss.get("restart_voltage", -9.5))
                     ss_restart_voltage = st.number_input(
                         "Restart Voltage [V]",
-                        value=_ss.get("restart_voltage", -9.5),
                         format="%.1f",
                         key="_w_ss_restart_voltage",
                         help="Voltage below which a new sequence start is detected.",
                     )
                 with _rs2:
+                    st.session_state.setdefault("_w_ss_restart_timeout", _ss.get("restart_timeout", 60.0))
                     ss_restart_timeout = st.number_input(
                         "Restart Timeout [s]",
-                        value=_ss.get("restart_timeout", 60.0),
                         min_value=1.0, step=10.0, format="%.0f",
                         key="_w_ss_restart_timeout",
                         help="Max seconds to wait for sequence restart between cycles.",
@@ -1886,56 +1994,56 @@ with tab_isweep:
         is_col_range, is_col_timing, is_col_opts = st.columns(3)
 
         with is_col_range:
+            st.session_state.setdefault("_w_interval_pulse_width", format_si(_isw.get("pulse_width", 1e-8)))
             st.text_input(
                 "Pulse Width [s] (fixed)",
-                value=format_si(_isw.get("pulse_width", 1e-8)),
                 key="_w_interval_pulse_width",
             )
+            st.session_state.setdefault("_w_interval_start", format_si(_isw.get("interval_start", 1e-8)))
             st.text_input(
                 "Interval Start [s]",
-                value=format_si(_isw.get("interval_start", 1e-8)),
                 key="_w_interval_start",
             )
+            st.session_state.setdefault("_w_interval_stop", format_si(_isw.get("interval_stop", 5e-8)))
             st.text_input(
                 "Interval Stop [s]",
-                value=format_si(_isw.get("interval_stop", 5e-8)),
                 key="_w_interval_stop",
             )
+            st.session_state.setdefault("_w_interval_step", format_si(_isw.get("interval_step", 5e-9)))
             st.text_input(
                 "Interval Step [s]",
-                value=format_si(_isw.get("interval_step", 5e-9)),
                 key="_w_interval_step",
             )
 
             # Variable step zones
             _is_szones = _isw.get("step_zones", [])
+            st.session_state.setdefault("_w_interval_variable_step", bool(_is_szones))
             _is_var_step = st.checkbox(
                 "Variable step zones",
-                value=bool(_is_szones),
                 key="_w_interval_variable_step",
             )
             _is_step_zones: list[tuple[float, float]] | None = None
             if _is_var_step:
                 _isz1 = _is_szones[0] if len(_is_szones) >= 1 else [None, None]
                 _isz2 = _is_szones[1] if len(_is_szones) >= 2 else [None, None]
+                st.session_state.setdefault("_w_interval_step_zone1_boundary", format_si(_isz1[0]) if _isz1[0] is not None else "")
                 _isz1_b = st.text_input(
                     "Zone 1 boundary [s]",
-                    value=format_si(_isz1[0]) if _isz1[0] is not None else "",
                     key="_w_interval_step_zone1_boundary",
                 )
+                st.session_state.setdefault("_w_interval_step_zone1_step", format_si(_isz1[1]) if _isz1[1] is not None else "")
                 _isz1_s = st.text_input(
                     "Zone 1 step [s]",
-                    value=format_si(_isz1[1]) if _isz1[1] is not None else "",
                     key="_w_interval_step_zone1_step",
                 )
+                st.session_state.setdefault("_w_interval_step_zone2_boundary", format_si(_isz2[0]) if _isz2[0] is not None else "")
                 _isz2_b = st.text_input(
                     "Zone 2 boundary [s]",
-                    value=format_si(_isz2[0]) if _isz2[0] is not None else "",
                     key="_w_interval_step_zone2_boundary",
                 )
+                st.session_state.setdefault("_w_interval_step_zone2_step", format_si(_isz2[1]) if _isz2[1] is not None else "")
                 _isz2_s = st.text_input(
                     "Zone 2 step [s]",
-                    value=format_si(_isz2[1]) if _isz2[1] is not None else "",
                     key="_w_interval_step_zone2_step",
                 )
 
@@ -1950,14 +2058,15 @@ with tab_isweep:
                     _is_step_zones = None
 
         with is_col_timing:
+            st.session_state.setdefault("_w_interval_wait_time", format_si(_isw.get("wait_time", 1.0)))
             st.text_input(
                 "Wait Time [s]",
-                value=format_si(_isw.get("wait_time", 1.0)),
                 key="_w_interval_wait_time",
             )
+            st.session_state.setdefault("_w_interval_settling_time", _isw.get("settling_time", 0.0))
             is_settling_time = st.number_input(
                 "Settling Time [s]",
-                value=_isw.get("settling_time", 0.0), min_value=0.0, step=1.0, format="%.1f",
+                min_value=0.0, step=1.0, format="%.1f",
                 help="Wait time before sweep starts",
                 key="_w_interval_settling_time",
             )
@@ -1976,15 +2085,15 @@ with tab_isweep:
             _is_delay_stop_val = int(trigger_delay)
 
             if _is_delay_mode_val == "exponent":
+                st.session_state.setdefault("_w_interval_trigger_delay_stop", _isw.get("trigger_delay_stop", int(trigger_delay)))
                 _is_delay_stop_val = st.number_input(
                     "Trigger Delay Stop [points] (×8)",
-                    value=_isw.get("trigger_delay_stop", int(trigger_delay)),
                     min_value=0, step=8,
                     key="_w_interval_trigger_delay_stop",
                 )
+                st.session_state.setdefault("_w_interval_delay_exponent", _isw.get("delay_exponent", 1.0))
                 is_delay_exponent = st.number_input(
                     "Delay Exponent",
-                    value=_isw.get("delay_exponent", 1.0),
                     min_value=-4.0, max_value=4.0, step=0.25, format="%.2f",
                     help="delay = a × interval^n + b (1=linear, -1=1/interval)",
                     key="_w_interval_delay_exponent",
@@ -2189,9 +2298,9 @@ with tab_isweep:
 
         with is_ig_mode_col:
             with st.expander(f"DMM Settings ({_ig.get('dmm_visa_address', DEFAULT_34401A_ADDRESS)})", expanded=False):
+                st.session_state.setdefault("_w_is_ig_dmm_address", _ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS))
                 st.text_input(
                     "DMM VISA Address",
-                    value=_ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS),
                     key="_w_is_ig_dmm_address",
                 )
 
@@ -2199,18 +2308,19 @@ with tab_isweep:
             _isc1, _isc2 = st.columns(2)
             with _isc1:
                 if is_sync_mode == "Ramp Detection":
+                    st.session_state.setdefault("_w_is_ig_poll_interval", _ig.get("poll_interval", 1.0))
                     is_ig_poll = st.number_input(
                         "Poll Interval [s]",
-                        value=_ig.get("poll_interval", 1.0),
                         min_value=0.1, step=0.5, format="%.1f",
                         key="_w_is_ig_poll_interval",
                     )
                 else:
                     is_ig_poll = _ig.get("poll_interval", 1.0)
             with _isc2:
+                st.session_state.setdefault("_w_is_ig_num_cycles",
+                    _ig.get("num_cycles", 0) if is_sync_mode == "Ramp Detection" else _ss.get("num_cycles", 0))
                 is_ig_cycles = st.number_input(
                     "Cycles (0 = infinite)",
-                    value=_ig.get("num_cycles", 0) if is_sync_mode == "Ramp Detection" else _ss.get("num_cycles", 0),
                     min_value=0, step=1,
                     key="_w_is_ig_num_cycles",
                 )
@@ -2218,23 +2328,23 @@ with tab_isweep:
         if is_sync_mode == "Ramp Detection":
             _isr1, _isr2, _isr3 = st.columns(3)
             with _isr1:
+                st.session_state.setdefault("_w_is_ig_trigger_start", _ig.get("trigger_start_voltage", -9.8))
                 is_ig_trig_start = st.number_input(
                     "Trigger Start [V]",
-                    value=_ig.get("trigger_start_voltage", -9.8),
                     format="%.2f",
                     key="_w_is_ig_trigger_start",
                 )
             with _isr2:
+                st.session_state.setdefault("_w_is_ig_trigger_end", _ig.get("trigger_end_voltage", -9.2))
                 is_ig_trig_end = st.number_input(
                     "Trigger End [V]",
-                    value=_ig.get("trigger_end_voltage", -9.2),
                     format="%.2f",
                     key="_w_is_ig_trigger_end",
                 )
             with _isr3:
+                st.session_state.setdefault("_w_is_ig_sweep_start", _ig.get("sweep_start_voltage", -9.0))
                 is_ig_sweep_start = st.number_input(
                     "Sweep Start [V]",
-                    value=_ig.get("sweep_start_voltage", -9.0),
                     format="%.2f",
                     key="_w_is_ig_sweep_start",
                 )
@@ -2420,25 +2530,25 @@ with tab_isweep:
         else:  # Step-Synced mode for interval sweep
             _iss1, _iss2, _iss3 = st.columns(3)
             with _iss1:
+                st.session_state.setdefault("_is_ss_total_steps", int(_ss.get("total_steps", 30)))
                 is_ss_total_steps = st.number_input(
                     "Total Steps (N)",
-                    value=int(_ss.get("total_steps", 30)),
                     min_value=2, step=1,
                     key="_is_ss_total_steps",
                     help="Total number of discrete voltage levels in the external step function.",
                 )
             with _iss2:
+                st.session_state.setdefault("_is_ss_sweep_start_step", int(_ss.get("sweep_start_step", 10)))
                 is_ss_sweep_start_step = st.number_input(
                     "Sweep Start Step",
-                    value=int(_ss.get("sweep_start_step", 10)),
                     min_value=0, step=1,
                     key="_is_ss_sweep_start_step",
                     help="0-based index where AWG sweep begins. Steps before this are monitoring-only.",
                 )
             with _iss3:
+                st.session_state.setdefault("_is_ss_confirm_reads", int(_ss.get("confirm_reads", 2)))
                 is_ss_confirm_reads = st.number_input(
                     "Confirm Reads",
-                    value=int(_ss.get("confirm_reads", 2)),
                     min_value=1, step=1,
                     key="_is_ss_confirm_reads",
                     help="Consecutive DMM reads above threshold to confirm a step transition.",
@@ -2446,33 +2556,33 @@ with tab_isweep:
 
             _iss4, _iss5, _iss6, _iss7 = st.columns(4)
             with _iss4:
+                st.session_state.setdefault("_is_ss_v_start", _ss.get("v_start", -10.0))
                 is_ss_v_start = st.number_input(
                     "V Start [V]",
-                    value=_ss.get("v_start", -10.0),
                     format="%.1f",
                     key="_is_ss_v_start",
                     help="Voltage at step 0.",
                 )
             with _iss5:
+                st.session_state.setdefault("_is_ss_v_stop", _ss.get("v_stop", 10.0))
                 is_ss_v_stop = st.number_input(
                     "V Stop [V]",
-                    value=_ss.get("v_stop", 10.0),
                     format="%.1f",
                     key="_is_ss_v_stop",
                     help="Voltage at step N-1.",
                 )
             with _iss6:
+                st.session_state.setdefault("_is_ss_poll_interval", _ss.get("poll_interval", 0.1))
                 is_ss_poll_interval = st.number_input(
                     "Poll Interval [s]",
-                    value=_ss.get("poll_interval", 0.1),
                     min_value=0.01, step=0.05, format="%.2f",
                     key="_is_ss_poll_interval",
                     help="Interval between DMM voltage reads.",
                 )
             with _iss7:
+                st.session_state.setdefault("_is_ss_step_timeout", _ss.get("step_timeout", 10.0))
                 is_ss_step_timeout = st.number_input(
                     "Step Timeout [s]",
-                    value=_ss.get("step_timeout", 10.0),
                     min_value=0.1, step=1.0, format="%.1f",
                     key="_is_ss_step_timeout",
                     help="Max seconds to wait for a single step transition.",
@@ -2481,17 +2591,17 @@ with tab_isweep:
             with st.expander("Restart Settings", expanded=False):
                 _isrs1, _isrs2 = st.columns(2)
                 with _isrs1:
+                    st.session_state.setdefault("_is_ss_restart_voltage", _ss.get("restart_voltage", -9.5))
                     is_ss_restart_voltage = st.number_input(
                         "Restart Voltage [V]",
-                        value=_ss.get("restart_voltage", -9.5),
                         format="%.1f",
                         key="_is_ss_restart_voltage",
                         help="Voltage below which a new sequence start is detected.",
                     )
                 with _isrs2:
+                    st.session_state.setdefault("_is_ss_restart_timeout", _ss.get("restart_timeout", 60.0))
                     is_ss_restart_timeout = st.number_input(
                         "Restart Timeout [s]",
-                        value=_ss.get("restart_timeout", 60.0),
                         min_value=1.0, step=10.0, format="%.0f",
                         key="_is_ss_restart_timeout",
                         help="Max seconds to wait for sequence restart between cycles.",
@@ -2689,36 +2799,40 @@ with tab_delay:
         col_d1, col_d2, col_d3 = st.columns([2, 2, 1])
 
         with col_d1:
+            st.session_state.setdefault("_w_delay_pulse_width", format_si(_ds.get("pulse_width", 1e-8)))
             st.text_input(
                 "Pulse Width [s]",
-                value=format_si(_ds.get("pulse_width", 1e-8)),
                 key="_w_delay_pulse_width",
             )
+            st.session_state.setdefault("_w_delay_start", _ds.get("delay_start", 0))
             st.number_input(
                 "Delay Start [points] (×8)",
-                value=_ds.get("delay_start", 0), min_value=0, step=8,
+                min_value=0, step=8,
                 key="_w_delay_start",
             )
+            st.session_state.setdefault("_w_delay_stop", _ds.get("delay_stop", 80))
             st.number_input(
                 "Delay Stop [points] (×8)",
-                value=_ds.get("delay_stop", 80), min_value=0, step=8,
+                min_value=0, step=8,
                 key="_w_delay_stop",
             )
 
         with col_d2:
+            st.session_state.setdefault("_w_delay_step", _ds.get("delay_step", 8))
             st.number_input(
                 "Delay Step [points] (×8)",
-                value=_ds.get("delay_step", 8), min_value=8, step=8,
+                min_value=8, step=8,
                 key="_w_delay_step",
             )
+            st.session_state.setdefault("_w_delay_wait_time", format_si(_ds.get("wait_time", 1.0)))
             st.text_input(
                 "Wait Time [s]",
-                value=format_si(_ds.get("wait_time", 1.0)),
                 key="_w_delay_wait_time",
             )
+            st.session_state.setdefault("_w_delay_settling_time", _ds.get("settling_time", 0.0))
             delay_settling_time = st.number_input(
                 "Settling Time [s]",
-                value=_ds.get("settling_time", 0.0), min_value=0.0, step=1.0, format="%.1f",
+                min_value=0.0, step=1.0, format="%.1f",
                 help="Wait time before sweep starts (for DUT to reach steady state)",
                 key="_w_delay_settling_time",
             )
