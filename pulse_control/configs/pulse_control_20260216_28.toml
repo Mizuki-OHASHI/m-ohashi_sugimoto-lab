@@ -39,7 +39,7 @@ settling_time = 2.0
 pulse_width = 2e-8
 pulse_interval = 1.6e-7
 saved_records = [ [ 0.0, 3144.0,], [ 2e-8, 3168.0,], [ 4e-8, 3168.0,], [ 8e-8, 3168.0,], [ 1.6e-7, 3168.0,],]
-triple_pulse = true
+pulse_mode = "triple"
 
 [interval_sweep]
 pulse_width = 2e-8
@@ -50,7 +50,7 @@ wait_time = 1.0
 settling_time = 1.0
 delay_mode = "table"
 delay_table = [ [ 0.0, 3144.0,], [ 2e-8, 3168.0,], [ 4e-8, 3168.0,], [ 8e-8, 3168.0,], [ 1.6e-7, 3168.0,],]
-triple_pulse = true
+pulse_mode = "triple"
 
 [integration]
 dmm_visa_address = "ASRL3::INSTR"

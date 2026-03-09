@@ -619,7 +619,8 @@ def run_step_synced_interval_sweep(
                 intervals,
                 channel=ch,
                 callback=upload_callback,
-                triple_pulse=interval_config.triple_pulse,
+                pulse_mode=interval_config.pulse_mode,
+                total_width=interval_config.total_width,
             )
         logger.info("Waveform upload complete.")
 

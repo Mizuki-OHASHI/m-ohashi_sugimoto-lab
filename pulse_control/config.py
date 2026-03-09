@@ -88,6 +88,11 @@ class BaseConfig:
             flat["delay_exponent"] = -1.0 if _interp == "inverse_width" else 1.0
         elif "delay_interp" in flat:
             flat.pop("delay_interp")
+        # Backward compat: triple_pulse -> pulse_mode
+        if "triple_pulse" in flat and "pulse_mode" not in flat:
+            flat["pulse_mode"] = "triple" if flat.pop("triple_pulse") else "double"
+        elif "triple_pulse" in flat:
+            flat.pop("triple_pulse")
         return flat
 
 
@@ -539,15 +544,19 @@ class DelaySweepConfig(BaseConfig):
 
 @dataclass
 class PumpProbeConfig(BaseConfig):
-    """Pump-probe (dual-pulse) output configuration for Agilent 81180A AWG.
+    """Pump-probe multi-pulse output configuration for Agilent 81180A AWG.
 
-    Two equal-width pulses per period separated by pulse_interval.
+    pulse_mode controls the number of pulses per period:
+    - "double": 2 pulses separated by pulse_interval
+    - "triple": 3 pulses with equal gaps (pulse_interval)
+    - "quad": 4 pulses as two pairs; total_width is fixed, pulse_interval = gap a
     """
 
-    pulse_width: float       # Width of each pulse [s] (pump and probe are equal)
-    pulse_interval: float    # Gap between the two pulses [s]
+    pulse_width: float       # Width of each pulse [s]
+    pulse_interval: float    # Gap between pulses [s] (= gap a in quad mode)
     waveform_mode: str = "arbitrary"
-    triple_pulse: bool = False  # When True, generate 3 pulses instead of 2
+    pulse_mode: str = "double"          # "double" | "triple" | "quad"
+    total_width: float | None = None    # Total width [s] for quad mode
 
     @classmethod
     def from_toml(cls, path: str | Path) -> PumpProbeConfig:
@@ -569,7 +578,8 @@ class PumpProbeConfig(BaseConfig):
                 "v_off": self.v_off,
                 "pulse_width": self.pulse_width,
                 "pulse_interval": self.pulse_interval,
-                **({"triple_pulse": self.triple_pulse} if self.triple_pulse else {}),
+                **({"pulse_mode": self.pulse_mode} if self.pulse_mode != "double" else {}),
+                **({"total_width": self.total_width} if self.total_width is not None else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -588,6 +598,10 @@ class PumpProbeConfig(BaseConfig):
         logger.info("Running validation")
         errors = self._validate_common()
 
+        if self.pulse_mode not in ("double", "triple", "quad"):
+            errors.append(
+                f"pulse_mode must be 'double', 'triple', or 'quad', got '{self.pulse_mode}'"
+            )
         if self.pulse_width <= 0:
             errors.append("pulse_width must be positive")
         if self.pulse_interval < 0:
@@ -595,22 +609,45 @@ class PumpProbeConfig(BaseConfig):
 
         # Pulse group must fit within one period
         if self.frequency > 0 and self.pulse_width > 0 and self.pulse_interval >= 0:
-            n = 3 if self.triple_pulse else 2
-            group_total = n * self.pulse_width + (n - 1) * self.pulse_interval
-            if group_total >= self.period:
-                errors.append(
-                    f"{n}×pulse_width + {n-1}×interval = {group_total:.4e} s "
-                    f"exceeds period = {self.period:.4e} s"
-                )
+            if self.pulse_mode == "quad":
+                if self.total_width is None:
+                    errors.append("total_width is required for quad pulse mode")
+                else:
+                    if self.total_width <= 4 * self.pulse_width:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s must be > "
+                            f"4×pulse_width = {4 * self.pulse_width:.4e} s"
+                        )
+                    b = self.total_width - 4 * self.pulse_width - 2 * self.pulse_interval
+                    if b <= 0:
+                        errors.append(
+                            f"gap b = total_width - 4×pw - 2×a = {b:.4e} s must be > 0"
+                        )
+                    if self.total_width >= self.period:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s "
+                            f"exceeds period = {self.period:.4e} s"
+                        )
+            else:
+                n = 3 if self.pulse_mode == "triple" else 2
+                group_total = n * self.pulse_width + (n - 1) * self.pulse_interval
+                if group_total >= self.period:
+                    errors.append(
+                        f"{n}×pulse_width + {n-1}×interval = {group_total:.4e} s "
+                        f"exceeds period = {self.period:.4e} s"
+                    )
 
         # Arbitrary-mode specific checks
         if self.waveform_mode == "arbitrary":
             from core import _calc_arb_params
 
+            arb_intervals = [self.pulse_interval]
+            if self.pulse_mode == "quad" and self.total_width is not None:
+                arb_intervals.append(self.total_width)
             try:
                 sample_rate, points_per_period = _calc_arb_params(
                     self.frequency, [self.pulse_width],
-                    intervals=[self.pulse_interval],
+                    intervals=arb_intervals,
                 )
                 if sample_rate < 10e6 or sample_rate > 4.2e9:
                     errors.append(
@@ -657,7 +694,8 @@ class IntervalSweepConfig(BaseConfig):
     delay_mode: str = "exponent"  # "exponent" | "table"
     delay_table: list[tuple[float, int]] | None = None  # [(interval_s, delay_pts), ...]
     step_zones: list[tuple[float, float]] | None = None
-    triple_pulse: bool = False  # When True, generate 3 pulses instead of 2
+    pulse_mode: str = "double"          # "double" | "triple" | "quad"
+    total_width: float | None = None    # Total width [s] for quad mode
 
     @classmethod
     def from_toml(cls, path: str | Path) -> IntervalSweepConfig:
@@ -703,7 +741,8 @@ class IntervalSweepConfig(BaseConfig):
                    if self.delay_table is not None else {}),
                 **({"step_zones": [list(row) for row in self.step_zones]}
                    if self.step_zones is not None else {}),
-                **({"triple_pulse": self.triple_pulse} if self.triple_pulse else {}),
+                **({"pulse_mode": self.pulse_mode} if self.pulse_mode != "double" else {}),
+                **({"total_width": self.total_width} if self.total_width is not None else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -736,15 +775,41 @@ class IntervalSweepConfig(BaseConfig):
         if self.settling_time < 0:
             errors.append("settling_time must be >= 0")
 
+        if self.pulse_mode not in ("double", "triple", "quad"):
+            errors.append(
+                f"pulse_mode must be 'double', 'triple', or 'quad', got '{self.pulse_mode}'"
+            )
+
         # Pulse group must fit within one period (check with largest interval)
         if self.frequency > 0 and self.pulse_width > 0:
-            n = 3 if self.triple_pulse else 2
-            group_total = n * self.pulse_width + (n - 1) * self.interval_stop
-            if group_total >= self.period:
-                errors.append(
-                    f"{n}×pulse_width + {n-1}×interval_stop = {group_total:.4e} s "
-                    f"exceeds period = {self.period:.4e} s"
-                )
+            if self.pulse_mode == "quad":
+                if self.total_width is None:
+                    errors.append("total_width is required for quad pulse mode")
+                else:
+                    if self.total_width <= 4 * self.pulse_width:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s must be > "
+                            f"4×pulse_width = {4 * self.pulse_width:.4e} s"
+                        )
+                    b_min = self.total_width - 4 * self.pulse_width - 2 * self.interval_stop
+                    if b_min <= 0:
+                        errors.append(
+                            f"gap b at interval_stop = {b_min:.4e} s must be > 0 "
+                            f"(total_width - 4×pw - 2×interval_stop)"
+                        )
+                    if self.total_width >= self.period:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s "
+                            f"exceeds period = {self.period:.4e} s"
+                        )
+            else:
+                n = 3 if self.pulse_mode == "triple" else 2
+                group_total = n * self.pulse_width + (n - 1) * self.interval_stop
+                if group_total >= self.period:
+                    errors.append(
+                        f"{n}×pulse_width + {n-1}×interval_stop = {group_total:.4e} s "
+                        f"exceeds period = {self.period:.4e} s"
+                    )
 
         # Delay mode validation
         if self.delay_mode not in ("exponent", "table"):

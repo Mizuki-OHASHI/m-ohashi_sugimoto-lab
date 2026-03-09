@@ -94,41 +94,39 @@ def _generate_pulse_waveform(
 def _generate_pump_probe_waveform(
     points_per_period: int,
     pulse_width: float,
-    pulse_interval: float,
+    gaps: list[float],
     frequency: float,
     *,
     inverted: bool = False,
-    triple_pulse: bool = False,
 ) -> np.ndarray:
-    """Generate one period of pump-probe waveform as DAC values.
+    """Generate one period of multi-pulse waveform as DAC values.
 
     Layout (pulse group centered within the period)::
 
-        2-pulse (default):
+        2-pulse: gaps=[interval]
         ___|^|__interval__|^|___
-           pw     gap      pw
 
-        3-pulse (triple_pulse=True):
+        3-pulse: gaps=[interval, interval]
         ___|^|__interval__|^|__interval__|^|___
-           pw     gap      pw     gap      pw
+
+        4-pulse: gaps=[a, b, a]
+        ___|^|___a___|^|_____b_____|^|___a___|^|___
 
     Parameters
     ----------
     points_per_period : int
     pulse_width : float  [s]
-    pulse_interval : float  [s]  gap between adjacent pulses
+    gaps : list[float]  [s]  gap durations between adjacent pulses
     frequency : float  [Hz]
     inverted : bool
-    triple_pulse : bool
-        When True, generate 3 pulses instead of 2.
     """
     period = 1.0 / frequency
     time_per_point = period / points_per_period
     pw_points = round(pulse_width / time_per_point)
-    interval_points = round(pulse_interval / time_per_point)
+    gap_points_list = [round(g / time_per_point) for g in gaps]
 
-    n_pulses = 3 if triple_pulse else 2
-    group_points = n_pulses * pw_points + (n_pulses - 1) * interval_points
+    n_pulses = len(gaps) + 1
+    group_points = n_pulses * pw_points + sum(gap_points_list)
     left_pad = (points_per_period - group_points) // 2
 
     if inverted:
@@ -138,9 +136,12 @@ def _generate_pump_probe_waveform(
         waveform = np.zeros(points_per_period, dtype=np.uint16)
         val = 4095
 
+    pos = left_pad
     for p in range(n_pulses):
-        start = left_pad + p * (pw_points + interval_points)
-        waveform[start:start + pw_points] = val
+        waveform[pos:pos + pw_points] = val
+        pos += pw_points
+        if p < len(gap_points_list):
+            pos += gap_points_list[p]
 
     return waveform
 
@@ -319,12 +320,13 @@ class PulseInstrument:
         *,
         channel: int = 1,
         callback: Callable[[int, int], None] | None = None,
-        triple_pulse: bool = False,
+        pulse_mode: str = "double",
+        total_width: float | None = None,
     ) -> None:
         """Arbitrary Waveform mode for pump-probe: upload segments with varying intervals."""
         logger.info(
-            "Starting pump-probe arbitrary setup (%d segments, CH%d)",
-            len(intervals), channel,
+            "Starting pump-probe arbitrary setup (%d segments, CH%d, mode=%s)",
+            len(intervals), channel, pulse_mode,
         )
         w = self._write
 
@@ -334,9 +336,14 @@ class PulseInstrument:
         w(":FUNC:MODE USER")
         w(":TRAC:DEL:ALL")
 
+        # Include total_width in GCD calculation for quad mode
+        arb_intervals = list(intervals)
+        if pulse_mode == "quad" and total_width is not None:
+            arb_intervals.append(total_width)
+
         sample_rate, points_per_period = _calc_arb_params(
             config.frequency, [pulse_width],
-            intervals=intervals,
+            intervals=arb_intervals,
             resolution_n=config.resolution_n,
         )
         logger.info(
@@ -348,9 +355,16 @@ class PulseInstrument:
         inverted = config.v_on < config.v_off
         for i, interval in enumerate(intervals):
             seg = i + 1
+            if pulse_mode == "quad" and total_width is not None:
+                b = total_width - 4 * pulse_width - 2 * interval
+                gaps = [interval, b, interval]
+            elif pulse_mode == "triple":
+                gaps = [interval, interval]
+            else:
+                gaps = [interval]
             waveform = _generate_pump_probe_waveform(
-                points_per_period, pulse_width, interval, config.frequency,
-                inverted=inverted, triple_pulse=triple_pulse,
+                points_per_period, pulse_width, gaps, config.frequency,
+                inverted=inverted,
             )
             w(f":TRACe:DEF {seg}, {points_per_period}")
             w(f":TRACe:SEL {seg}")

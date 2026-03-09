@@ -328,7 +328,10 @@ def _load_config_to_widgets(data: dict) -> None:
     # Pump-Probe
     st.session_state._w_pp_pulse_width = format_si(pp.get("pulse_width", 1e-8))
     st.session_state._w_pp_pulse_interval = format_si(pp.get("pulse_interval", 2e-8))
-    st.session_state._w_pp_triple_pulse = pp.get("triple_pulse", False)
+    _pp_mode = pp.get("pulse_mode", "triple" if pp.get("triple_pulse") else "double")
+    st.session_state._w_pp_pulse_mode = {"double": "2 Pulse", "triple": "3 Pulse", "quad": "4 Pulse"}.get(_pp_mode, "2 Pulse")
+    _pp_tw = pp.get("total_width")
+    st.session_state._w_pp_total_width = format_si(_pp_tw) if _pp_tw else ""
 
     # saved_pp_records (non-widget state)
     _pp_saved = pp.get("saved_records") or isw.get("delay_table")
@@ -343,7 +346,10 @@ def _load_config_to_widgets(data: dict) -> None:
             st.session_state.saved_pp_records = _pp_csv
 
     # Interval Sweep
-    st.session_state._w_interval_triple_pulse = isw.get("triple_pulse", False)
+    _isw_mode = isw.get("pulse_mode", "triple" if isw.get("triple_pulse") else "double")
+    st.session_state._w_interval_pulse_mode = {"double": "2 Pulse", "triple": "3 Pulse", "quad": "4 Pulse"}.get(_isw_mode, "2 Pulse")
+    _isw_tw = isw.get("total_width")
+    st.session_state._w_interval_total_width = format_si(_isw_tw) if _isw_tw else ""
     st.session_state._w_interval_pulse_width = format_si(isw.get("pulse_width", 1e-8))
     st.session_state._w_interval_start = format_si(isw.get("interval_start", 1e-8))
     st.session_state._w_interval_stop = format_si(isw.get("interval_stop", 5e-8))
@@ -454,7 +460,8 @@ def _pump_probe_start(config: PumpProbeConfig, channel: int) -> None:
     try:
         inst.setup_pump_probe_arbitrary(
             config, config.pulse_width, [config.pulse_interval],
-            channel=channel, triple_pulse=config.triple_pulse,
+            channel=channel,
+            pulse_mode=config.pulse_mode, total_width=config.total_width,
         )
     except Exception:
         if close_after:
@@ -926,8 +933,18 @@ with tab_pp:
                 "Pulse Interval [s]",
                 key="_w_pp_pulse_interval",
             )
-            st.session_state.setdefault("_w_pp_triple_pulse", _pp.get("triple_pulse", False))
-            st.checkbox("Triple Pulse (3 pulses)", key="_w_pp_triple_pulse")
+            _pp_mode_default = {"double": "2 Pulse", "triple": "3 Pulse", "quad": "4 Pulse"}.get(
+                _pp.get("pulse_mode", "triple" if _pp.get("triple_pulse") else "double"), "2 Pulse")
+            st.session_state.setdefault("_w_pp_pulse_mode", _pp_mode_default)
+            st.radio("Pulse Mode", ["2 Pulse", "3 Pulse", "4 Pulse"],
+                     key="_w_pp_pulse_mode", horizontal=True)
+            _pp_mode_val = {"2 Pulse": "double", "3 Pulse": "triple", "4 Pulse": "quad"}.get(
+                st.session_state.get("_w_pp_pulse_mode", "2 Pulse"), "double")
+
+            pp_total_width_val: float | None = None
+            if _pp_mode_val == "quad":
+                st.session_state.setdefault("_w_pp_total_width", "")
+                st.text_input("Total Width [s]", key="_w_pp_total_width")
 
             # Parse pump-probe specific fields
             pp_parse_errors = list(common_parse_errors)
@@ -945,6 +962,17 @@ with tab_pp:
                 pp_parse_errors.append(
                     f"pulse_interval: invalid value \"{st.session_state.get('_w_pp_pulse_interval', '')}\""
                 )
+            if _pp_mode_val == "quad":
+                _tw_str = st.session_state.get("_w_pp_total_width", "").strip()
+                if _tw_str:
+                    try:
+                        pp_total_width_val = parse_si(_tw_str)
+                    except ValueError:
+                        pp_parse_errors.append(
+                            f"total_width: invalid value \"{_tw_str}\""
+                        )
+                else:
+                    pp_parse_errors.append("total_width is required for 4 Pulse mode")
 
             pp_config: PumpProbeConfig | None = None
             if not pp_parse_errors and pp_pulse_width_val is not None and pp_pulse_interval_val is not None:
@@ -957,7 +985,8 @@ with tab_pp:
                     resolution_n=int(resolution_n),
                     pulse_width=pp_pulse_width_val,
                     pulse_interval=pp_pulse_interval_val,
-                    triple_pulse=st.session_state.get("_w_pp_triple_pulse", False),
+                    pulse_mode=_pp_mode_val,
+                    total_width=pp_total_width_val,
                 )
 
             errors_pp = list(pp_parse_errors)
@@ -2000,8 +2029,16 @@ with tab_isweep:
         is_col_range, is_col_timing, is_col_opts = st.columns(3)
 
         with is_col_range:
-            st.session_state.setdefault("_w_interval_triple_pulse", _isw.get("triple_pulse", False))
-            st.checkbox("Triple Pulse (3 pulses)", key="_w_interval_triple_pulse")
+            _isw_mode_default = {"double": "2 Pulse", "triple": "3 Pulse", "quad": "4 Pulse"}.get(
+                _isw.get("pulse_mode", "triple" if _isw.get("triple_pulse") else "double"), "2 Pulse")
+            st.session_state.setdefault("_w_interval_pulse_mode", _isw_mode_default)
+            st.radio("Pulse Mode", ["2 Pulse", "3 Pulse", "4 Pulse"],
+                     key="_w_interval_pulse_mode", horizontal=True)
+            _isw_mode_val = {"2 Pulse": "double", "3 Pulse": "triple", "4 Pulse": "quad"}.get(
+                st.session_state.get("_w_interval_pulse_mode", "2 Pulse"), "double")
+            if _isw_mode_val == "quad":
+                st.session_state.setdefault("_w_interval_total_width", "")
+                st.text_input("Total Width [s]", key="_w_interval_total_width")
             st.session_state.setdefault("_w_interval_pulse_width", format_si(_isw.get("pulse_width", 1e-8)))
             st.text_input(
                 "Pulse Width [s] (fixed)",
@@ -2137,6 +2174,20 @@ with tab_isweep:
                     f"{name}: invalid value \"{st.session_state.get(key, '')}\""
                 )
 
+        # Parse total_width for quad mode
+        _is_total_width_val: float | None = None
+        if _isw_mode_val == "quad":
+            _tw_str = st.session_state.get("_w_interval_total_width", "").strip()
+            if _tw_str:
+                try:
+                    _is_total_width_val = parse_si(_tw_str)
+                except ValueError:
+                    is_parse_errors.append(
+                        f"total_width: invalid value \"{_tw_str}\""
+                    )
+            else:
+                is_parse_errors.append("total_width is required for 4 Pulse mode")
+
         # Build delay_table for interval sweep
         _is_delay_table: list[tuple[float, int]] | None = None
         if _is_delay_mode_val == "table":
@@ -2168,7 +2219,8 @@ with tab_isweep:
                 delay_mode=_is_delay_mode_val,
                 delay_table=_is_delay_table,
                 step_zones=_is_step_zones,
-                triple_pulse=st.session_state.get("_w_interval_triple_pulse", False),
+                pulse_mode=_isw_mode_val,
+                total_width=_is_total_width_val,
             )
 
         # Validation
@@ -2235,7 +2287,7 @@ with tab_isweep:
                     instrument.setup_pump_probe_arbitrary(
                         config, config.pulse_width, intervals_list,
                         channel=ch, callback=on_is_upload,
-                        triple_pulse=config.triple_pulse,
+                        pulse_mode=config.pulse_mode, total_width=config.total_width,
                     )
 
                 # Set DC 0V immediately after upload (no pulses until sweep starts)
@@ -2428,7 +2480,7 @@ with tab_isweep:
                         instrument.setup_pump_probe_arbitrary(
                             config, config.pulse_width, intervals_list,
                             channel=ch, callback=on_auto_is_upload,
-                            triple_pulse=config.triple_pulse,
+                            pulse_mode=config.pulse_mode, total_width=config.total_width,
                         )
 
                     # Set DC 0V immediately after upload (no pulses until sweep starts)
@@ -2709,7 +2761,7 @@ with tab_isweep:
                         instrument.setup_pump_probe_arbitrary(
                             config, config.pulse_width, intervals_list,
                             channel=ch, callback=on_ss_is_upload,
-                            triple_pulse=config.triple_pulse,
+                            pulse_mode=config.pulse_mode, total_width=config.total_width,
                         )
 
                     for ch in channels:
@@ -3089,8 +3141,17 @@ def _build_toml_data() -> dict:
             [parse_si(r["pulse_interval"]), float(r["trigger_delay"])]
             for r in st.session_state.get("saved_pp_records", [])
         ]
-    if st.session_state.get("_w_pp_triple_pulse", False):
-        pp_data["triple_pulse"] = True
+    _pp_mode_export = {"2 Pulse": "double", "3 Pulse": "triple", "4 Pulse": "quad"}.get(
+        st.session_state.get("_w_pp_pulse_mode", "2 Pulse"), "double")
+    if _pp_mode_export != "double":
+        pp_data["pulse_mode"] = _pp_mode_export
+    if _pp_mode_export == "quad":
+        _tw = st.session_state.get("_w_pp_total_width", "").strip()
+        if _tw:
+            try:
+                pp_data["total_width"] = parse_si(_tw)
+            except ValueError:
+                pass
     data["pump_probe"] = pp_data
 
     # Interval Sweep section
@@ -3147,8 +3208,17 @@ def _build_toml_data() -> dict:
                     pass
         if _isz_save:
             isw_data["step_zones"] = _isz_save
-    if st.session_state.get("_w_interval_triple_pulse", False):
-        isw_data["triple_pulse"] = True
+    _isw_mode_export = {"2 Pulse": "double", "3 Pulse": "triple", "4 Pulse": "quad"}.get(
+        st.session_state.get("_w_interval_pulse_mode", "2 Pulse"), "double")
+    if _isw_mode_export != "double":
+        isw_data["pulse_mode"] = _isw_mode_export
+    if _isw_mode_export == "quad":
+        _tw = st.session_state.get("_w_interval_total_width", "").strip()
+        if _tw:
+            try:
+                isw_data["total_width"] = parse_si(_tw)
+            except ValueError:
+                pass
     data["interval_sweep"] = isw_data
 
     # Integration (Auto Sweep)

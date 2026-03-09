@@ -39,7 +39,7 @@ settling_time = 2.0
 pulse_width = 2e-8
 pulse_interval = 3.2e-7
 saved_records = [ [ 0.0, 1160.0,], [ 2e-8, 1160.0,], [ 4e-8, 1160.0,], [ 8e-8, 1160.0,], [ 1.6e-7, 1160.0,], [ 3.2e-7, 1160.0,],]
-triple_pulse = true
+pulse_mode = "triple"
 
 [interval_sweep]
 pulse_width = 2e-8
@@ -48,7 +48,7 @@ interval_stop = 3.2e-7
 interval_step = 1e-8
 wait_time = 1.0
 settling_time = 1.0
-triple_pulse = true
+pulse_mode = "triple"
 
 [integration]
 dmm_visa_address = "ASRL3::INSTR"
