@@ -328,6 +328,7 @@ def _load_config_to_widgets(data: dict) -> None:
     # Pump-Probe
     st.session_state._w_pp_pulse_width = format_si(pp.get("pulse_width", 1e-8))
     st.session_state._w_pp_pulse_interval = format_si(pp.get("pulse_interval", 2e-8))
+    st.session_state._w_pp_triple_pulse = pp.get("triple_pulse", False)
 
     # saved_pp_records (non-widget state)
     _pp_saved = pp.get("saved_records") or isw.get("delay_table")
@@ -342,6 +343,7 @@ def _load_config_to_widgets(data: dict) -> None:
             st.session_state.saved_pp_records = _pp_csv
 
     # Interval Sweep
+    st.session_state._w_interval_triple_pulse = isw.get("triple_pulse", False)
     st.session_state._w_interval_pulse_width = format_si(isw.get("pulse_width", 1e-8))
     st.session_state._w_interval_start = format_si(isw.get("interval_start", 1e-8))
     st.session_state._w_interval_stop = format_si(isw.get("interval_stop", 5e-8))
@@ -451,7 +453,8 @@ def _pump_probe_start(config: PumpProbeConfig, channel: int) -> None:
 
     try:
         inst.setup_pump_probe_arbitrary(
-            config, config.pulse_width, [config.pulse_interval], channel=channel,
+            config, config.pulse_width, [config.pulse_interval],
+            channel=channel, triple_pulse=config.triple_pulse,
         )
     except Exception:
         if close_after:
@@ -923,6 +926,8 @@ with tab_pp:
                 "Pulse Interval [s]",
                 key="_w_pp_pulse_interval",
             )
+            st.session_state.setdefault("_w_pp_triple_pulse", _pp.get("triple_pulse", False))
+            st.checkbox("Triple Pulse (3 pulses)", key="_w_pp_triple_pulse")
 
             # Parse pump-probe specific fields
             pp_parse_errors = list(common_parse_errors)
@@ -952,6 +957,7 @@ with tab_pp:
                     resolution_n=int(resolution_n),
                     pulse_width=pp_pulse_width_val,
                     pulse_interval=pp_pulse_interval_val,
+                    triple_pulse=st.session_state.get("_w_pp_triple_pulse", False),
                 )
 
             errors_pp = list(pp_parse_errors)
@@ -1994,6 +2000,8 @@ with tab_isweep:
         is_col_range, is_col_timing, is_col_opts = st.columns(3)
 
         with is_col_range:
+            st.session_state.setdefault("_w_interval_triple_pulse", _isw.get("triple_pulse", False))
+            st.checkbox("Triple Pulse (3 pulses)", key="_w_interval_triple_pulse")
             st.session_state.setdefault("_w_interval_pulse_width", format_si(_isw.get("pulse_width", 1e-8)))
             st.text_input(
                 "Pulse Width [s] (fixed)",
@@ -2160,6 +2168,7 @@ with tab_isweep:
                 delay_mode=_is_delay_mode_val,
                 delay_table=_is_delay_table,
                 step_zones=_is_step_zones,
+                triple_pulse=st.session_state.get("_w_interval_triple_pulse", False),
             )
 
         # Validation
@@ -2226,6 +2235,7 @@ with tab_isweep:
                     instrument.setup_pump_probe_arbitrary(
                         config, config.pulse_width, intervals_list,
                         channel=ch, callback=on_is_upload,
+                        triple_pulse=config.triple_pulse,
                     )
 
                 # Set DC 0V immediately after upload (no pulses until sweep starts)
@@ -2418,6 +2428,7 @@ with tab_isweep:
                         instrument.setup_pump_probe_arbitrary(
                             config, config.pulse_width, intervals_list,
                             channel=ch, callback=on_auto_is_upload,
+                            triple_pulse=config.triple_pulse,
                         )
 
                     # Set DC 0V immediately after upload (no pulses until sweep starts)
@@ -2698,6 +2709,7 @@ with tab_isweep:
                         instrument.setup_pump_probe_arbitrary(
                             config, config.pulse_width, intervals_list,
                             channel=ch, callback=on_ss_is_upload,
+                            triple_pulse=config.triple_pulse,
                         )
 
                     for ch in channels:
@@ -3077,6 +3089,8 @@ def _build_toml_data() -> dict:
             [parse_si(r["pulse_interval"]), float(r["trigger_delay"])]
             for r in st.session_state.get("saved_pp_records", [])
         ]
+    if st.session_state.get("_w_pp_triple_pulse", False):
+        pp_data["triple_pulse"] = True
     data["pump_probe"] = pp_data
 
     # Interval Sweep section
@@ -3133,6 +3147,8 @@ def _build_toml_data() -> dict:
                     pass
         if _isz_save:
             isw_data["step_zones"] = _isz_save
+    if st.session_state.get("_w_interval_triple_pulse", False):
+        isw_data["triple_pulse"] = True
     data["interval_sweep"] = isw_data
 
     # Integration (Auto Sweep)

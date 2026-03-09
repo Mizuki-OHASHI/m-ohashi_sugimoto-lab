@@ -359,6 +359,7 @@ def run_integrated_interval_sweep(
                 intervals,
                 channel=ch,
                 callback=upload_callback,
+                triple_pulse=interval_config.triple_pulse,
             )
         logger.info("Waveform upload complete.")
 

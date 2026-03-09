@@ -547,6 +547,7 @@ class PumpProbeConfig(BaseConfig):
     pulse_width: float       # Width of each pulse [s] (pump and probe are equal)
     pulse_interval: float    # Gap between the two pulses [s]
     waveform_mode: str = "arbitrary"
+    triple_pulse: bool = False  # When True, generate 3 pulses instead of 2
 
     @classmethod
     def from_toml(cls, path: str | Path) -> PumpProbeConfig:
@@ -568,6 +569,7 @@ class PumpProbeConfig(BaseConfig):
                 "v_off": self.v_off,
                 "pulse_width": self.pulse_width,
                 "pulse_interval": self.pulse_interval,
+                **({"triple_pulse": self.triple_pulse} if self.triple_pulse else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -591,12 +593,13 @@ class PumpProbeConfig(BaseConfig):
         if self.pulse_interval < 0:
             errors.append("pulse_interval must be >= 0")
 
-        # Pair must fit within one period
+        # Pulse group must fit within one period
         if self.frequency > 0 and self.pulse_width > 0 and self.pulse_interval >= 0:
-            pair_total = 2 * self.pulse_width + self.pulse_interval
-            if pair_total >= self.period:
+            n = 3 if self.triple_pulse else 2
+            group_total = n * self.pulse_width + (n - 1) * self.pulse_interval
+            if group_total >= self.period:
                 errors.append(
-                    f"2×pulse_width + interval = {pair_total:.4e} s "
+                    f"{n}×pulse_width + {n-1}×interval = {group_total:.4e} s "
                     f"exceeds period = {self.period:.4e} s"
                 )
 
@@ -654,6 +657,7 @@ class IntervalSweepConfig(BaseConfig):
     delay_mode: str = "exponent"  # "exponent" | "table"
     delay_table: list[tuple[float, int]] | None = None  # [(interval_s, delay_pts), ...]
     step_zones: list[tuple[float, float]] | None = None
+    triple_pulse: bool = False  # When True, generate 3 pulses instead of 2
 
     @classmethod
     def from_toml(cls, path: str | Path) -> IntervalSweepConfig:
@@ -699,6 +703,7 @@ class IntervalSweepConfig(BaseConfig):
                    if self.delay_table is not None else {}),
                 **({"step_zones": [list(row) for row in self.step_zones]}
                    if self.step_zones is not None else {}),
+                **({"triple_pulse": self.triple_pulse} if self.triple_pulse else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -731,12 +736,13 @@ class IntervalSweepConfig(BaseConfig):
         if self.settling_time < 0:
             errors.append("settling_time must be >= 0")
 
-        # Pair must fit within one period (check with largest interval)
+        # Pulse group must fit within one period (check with largest interval)
         if self.frequency > 0 and self.pulse_width > 0:
-            pair_total = 2 * self.pulse_width + self.interval_stop
-            if pair_total >= self.period:
+            n = 3 if self.triple_pulse else 2
+            group_total = n * self.pulse_width + (n - 1) * self.interval_stop
+            if group_total >= self.period:
                 errors.append(
-                    f"2×pulse_width + interval_stop = {pair_total:.4e} s "
+                    f"{n}×pulse_width + {n-1}×interval_stop = {group_total:.4e} s "
                     f"exceeds period = {self.period:.4e} s"
                 )
 

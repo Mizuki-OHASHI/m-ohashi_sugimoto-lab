@@ -98,40 +98,49 @@ def _generate_pump_probe_waveform(
     frequency: float,
     *,
     inverted: bool = False,
+    triple_pulse: bool = False,
 ) -> np.ndarray:
-    """Generate one period of pump-probe (double-pulse) waveform as DAC values.
+    """Generate one period of pump-probe waveform as DAC values.
 
-    Layout (pair centered within the period)::
+    Layout (pulse group centered within the period)::
 
-        |<--- period = 1/freq --->|
+        2-pulse (default):
         ___|^|__interval__|^|___
            pw     gap      pw
+
+        3-pulse (triple_pulse=True):
+        ___|^|__interval__|^|__interval__|^|___
+           pw     gap      pw     gap      pw
 
     Parameters
     ----------
     points_per_period : int
     pulse_width : float  [s]
-    pulse_interval : float  [s]  gap between the two pulses
+    pulse_interval : float  [s]  gap between adjacent pulses
     frequency : float  [Hz]
     inverted : bool
+    triple_pulse : bool
+        When True, generate 3 pulses instead of 2.
     """
     period = 1.0 / frequency
     time_per_point = period / points_per_period
     pw_points = round(pulse_width / time_per_point)
     interval_points = round(pulse_interval / time_per_point)
-    pair_points = 2 * pw_points + interval_points
-    left_pad = (points_per_period - pair_points) // 2
+
+    n_pulses = 3 if triple_pulse else 2
+    group_points = n_pulses * pw_points + (n_pulses - 1) * interval_points
+    left_pad = (points_per_period - group_points) // 2
 
     if inverted:
         waveform = np.full(points_per_period, 4095, dtype=np.uint16)
-        waveform[left_pad:left_pad + pw_points] = 0
-        p2_start = left_pad + pw_points + interval_points
-        waveform[p2_start:p2_start + pw_points] = 0
+        val = 0
     else:
         waveform = np.zeros(points_per_period, dtype=np.uint16)
-        waveform[left_pad:left_pad + pw_points] = 4095
-        p2_start = left_pad + pw_points + interval_points
-        waveform[p2_start:p2_start + pw_points] = 4095
+        val = 4095
+
+    for p in range(n_pulses):
+        start = left_pad + p * (pw_points + interval_points)
+        waveform[start:start + pw_points] = val
 
     return waveform
 
@@ -310,6 +319,7 @@ class PulseInstrument:
         *,
         channel: int = 1,
         callback: Callable[[int, int], None] | None = None,
+        triple_pulse: bool = False,
     ) -> None:
         """Arbitrary Waveform mode for pump-probe: upload segments with varying intervals."""
         logger.info(
@@ -340,7 +350,7 @@ class PulseInstrument:
             seg = i + 1
             waveform = _generate_pump_probe_waveform(
                 points_per_period, pulse_width, interval, config.frequency,
-                inverted=inverted,
+                inverted=inverted, triple_pulse=triple_pulse,
             )
             w(f":TRACe:DEF {seg}, {points_per_period}")
             w(f":TRACe:SEL {seg}")
