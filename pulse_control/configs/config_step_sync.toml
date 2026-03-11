@@ -1,0 +1,30 @@
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"
+
+[common]
+v_on = 0.0
+v_off = -1.0
+frequency = 10_000_000.0    # 10 MHz
+trigger_delay = 0
+resolution_n = 1
+
+[width_sweep]
+width_start = 1e-8           # 10 ns
+width_stop = 5e-8            # 50 ns
+width_step = 5e-9            # 5 ns  -> 9 segments
+wait_time = 1.0              # (not used in step-sync mode, kept for compat)
+settling_time = 0.0
+
+[step_sync]
+dmm_visa_address = "ASRL3::INSTR"
+total_steps = 30             # N: total voltage levels in step function
+sweep_start_step = 10        # First 10 steps are monitoring-only
+                             # Sweep segments (9) must fit: 10 + 9 <= 30
+v_start = -10.0              # Voltage at step 0 [V]
+v_stop = 10.0                # Voltage at step N-1 [V]
+poll_interval = 0.1          # Interval between DMM reads [s]
+confirm_reads = 2            # Consecutive reads above threshold to confirm step
+step_timeout = 10.0          # Max seconds per step transition [s]
+num_cycles = 0               # 0 = infinite (Ctrl+C to stop)
+restart_voltage = -9.5       # Below this = new sequence start [V]
+restart_timeout = 60.0       # Max wait for sequence restart [s]

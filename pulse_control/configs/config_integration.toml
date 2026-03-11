@@ -1,0 +1,25 @@
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"
+
+[common]
+v_on = 0.0
+v_off = -1.0
+frequency = 10000000.0
+period = 1e-7
+trigger_delay = 0
+resolution_n = 1
+
+[width_sweep]
+width_start = 1e-8
+width_stop = 5e-8
+width_step = 5e-9
+wait_time = 1.0
+settling_time = 0.0
+
+[integration]
+dmm_visa_address = "ASRL3::INSTR"
+trigger_start_voltage = -9.8     # Start collecting fit data [V]
+trigger_end_voltage = -9.2       # Stop collecting, do linear fit [V]
+sweep_start_voltage = -9.0       # Predict this voltage to start sweep [V]
+poll_interval = 1.0              # DMM read interval [s]
+num_cycles = 0                   # 0 = infinite (Ctrl+C to stop)

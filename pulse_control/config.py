@@ -88,6 +88,11 @@ class BaseConfig:
             flat["delay_exponent"] = -1.0 if _interp == "inverse_width" else 1.0
         elif "delay_interp" in flat:
             flat.pop("delay_interp")
+        # Backward compat: triple_pulse -> pulse_mode
+        if "triple_pulse" in flat and "pulse_mode" not in flat:
+            flat["pulse_mode"] = "triple" if flat.pop("triple_pulse") else "double"
+        elif "triple_pulse" in flat:
+            flat.pop("triple_pulse")
         return flat
 
 
@@ -205,6 +210,9 @@ class SweepConfig(BaseConfig):
     settling_time: float = 0.0  # Initial settling time before sweep [s]
     trigger_delay_stop: int | None = None  # None = fixed delay; set to sweep delay
     delay_exponent: float = 1.0  # delay = a * pw^n + b (1=linear, -1=1/pw)
+    delay_mode: str = "exponent"  # "exponent" | "table"
+    delay_table: list[tuple[float, int]] | None = None  # [(pw_sec, delay_points), ...]
+    step_zones: list[tuple[float, float]] | None = None  # [(boundary_s, step_s), ...]
 
     @classmethod
     def from_toml(cls, path: str | Path) -> SweepConfig:
@@ -214,6 +222,15 @@ class SweepConfig(BaseConfig):
         If both are present, frequency takes precedence.
         """
         flat = cls._load_and_flatten_toml(path)
+        # Convert delay_table from list-of-lists to list-of-tuples
+        if "delay_table" in flat and flat["delay_table"] is not None:
+            flat["delay_table"] = [
+                (float(row[0]), int(row[1])) for row in flat["delay_table"]
+            ]
+        if "step_zones" in flat and flat["step_zones"] is not None:
+            flat["step_zones"] = [
+                (float(row[0]), float(row[1])) for row in flat["step_zones"]
+            ]
         # Keep only valid dataclass field names
         valid_keys = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in flat.items() if k in valid_keys}
@@ -240,6 +257,12 @@ class SweepConfig(BaseConfig):
                    if self.trigger_delay_stop is not None else {}),
                 **({"delay_exponent": self.delay_exponent}
                    if self.delay_exponent != 1.0 else {}),
+                **({"delay_mode": self.delay_mode}
+                   if self.delay_mode != "exponent" else {}),
+                **({"delay_table": [list(row) for row in self.delay_table]}
+                   if self.delay_table is not None else {}),
+                **({"step_zones": [list(row) for row in self.step_zones]}
+                   if self.step_zones is not None else {}),
             },
             "awg": {
                 "frequency": self.frequency,
@@ -271,16 +294,58 @@ class SweepConfig(BaseConfig):
         if self.settling_time < 0:
             errors.append("settling_time must be >= 0")
 
-        if self.trigger_delay_stop is not None:
-            if self.trigger_delay_stop < 0:
-                errors.append("trigger_delay_stop must be >= 0")
-            if self.trigger_delay_stop % 8 != 0:
-                errors.append("trigger_delay_stop must be a multiple of 8")
-
-        if abs(self.delay_exponent) < 0.25 or abs(self.delay_exponent) > 4.0:
+        if self.delay_mode not in ("exponent", "table"):
             errors.append(
-                f"delay_exponent abs must be 0.25–4.0, got {self.delay_exponent}"
+                f"delay_mode must be 'exponent' or 'table', got '{self.delay_mode}'"
             )
+
+        if self.delay_mode == "exponent":
+            if self.trigger_delay_stop is not None:
+                if self.trigger_delay_stop < 0:
+                    errors.append("trigger_delay_stop must be >= 0")
+                if self.trigger_delay_stop % 8 != 0:
+                    errors.append("trigger_delay_stop must be a multiple of 8")
+
+            if abs(self.delay_exponent) < 0.25 or abs(self.delay_exponent) > 4.0:
+                errors.append(
+                    f"delay_exponent abs must be 0.25–4.0, got {self.delay_exponent}"
+                )
+
+        if self.delay_mode == "table":
+            if self.delay_table is None or len(self.delay_table) < 2:
+                errors.append(
+                    "delay_table must have at least 2 entries for table mode"
+                )
+            elif self.delay_table is not None:
+                table_pws = [row[0] for row in self.delay_table]
+                table_min = min(table_pws)
+                table_max = max(table_pws)
+                if self.width_start < table_min or self.width_start > table_max:
+                    errors.append(
+                        f"width_start ({self.width_start:.4e} s) is outside "
+                        f"delay table range ({table_min:.4e}–{table_max:.4e} s). "
+                        "Extrapolation is not allowed."
+                    )
+                if self.width_stop < table_min or self.width_stop > table_max:
+                    errors.append(
+                        f"width_stop ({self.width_stop:.4e} s) is outside "
+                        f"delay table range ({table_min:.4e}–{table_max:.4e} s). "
+                        "Extrapolation is not allowed."
+                    )
+
+        if self.step_zones:
+            boundaries = [b for b, _ in self.step_zones]
+            if boundaries != sorted(boundaries):
+                errors.append("step_zones boundaries must be in ascending order")
+            for b, s in self.step_zones:
+                if s <= 0:
+                    errors.append(f"step_zones step must be positive, got {s}")
+                if b <= self.width_start or b >= self.width_stop:
+                    errors.append(
+                        f"step_zones boundary {b:.4e} must be between "
+                        f"width_start ({self.width_start:.4e}) and "
+                        f"width_stop ({self.width_stop:.4e})"
+                    )
 
         if self.waveform_mode not in ("square", "arbitrary"):
             errors.append(
@@ -306,7 +371,10 @@ class SweepConfig(BaseConfig):
         if self.waveform_mode == "arbitrary":
             from core import _calc_arb_params, _generate_widths
 
-            widths = _generate_widths(self.width_start, self.width_stop, self.width_step)
+            widths = _generate_widths(
+                self.width_start, self.width_stop, self.width_step,
+                step_zones=self.step_zones,
+            )
             try:
                 sample_rate, points_per_period = _calc_arb_params(self.frequency, widths)
                 if sample_rate < 10e6 or sample_rate > 4.2e9:
@@ -474,6 +542,364 @@ class DelaySweepConfig(BaseConfig):
         return errors
 
 
+@dataclass
+class PumpProbeConfig(BaseConfig):
+    """Pump-probe multi-pulse output configuration for Agilent 81180A AWG.
+
+    pulse_mode controls the number of pulses per period:
+    - "double": 2 pulses separated by pulse_interval
+    - "triple": 3 pulses with equal gaps (pulse_interval)
+    - "quad": 4 pulses as two pairs; total_width is fixed, pulse_interval = gap a
+    """
+
+    pulse_width: float       # Width of each pulse [s]
+    pulse_interval: float    # Gap between pulses [s] (= gap a in quad mode)
+    waveform_mode: str = "arbitrary"
+    pulse_mode: str = "double"          # "double" | "triple" | "quad"
+    total_width: float | None = None    # Total width [s] for quad mode
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> PumpProbeConfig:
+        """Load configuration from a TOML file."""
+        flat = cls._load_and_flatten_toml(path)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in flat.items() if k in valid_keys}
+        return cls(**filtered)
+
+    def to_toml(self, path: str | Path) -> None:
+        """Export to a TOML file."""
+        logger.info("Writing TOML: %s", path)
+        data = {
+            "connection": {
+                "visa_address": self.visa_address,
+            },
+            "pulse": {
+                "v_on": self.v_on,
+                "v_off": self.v_off,
+                "pulse_width": self.pulse_width,
+                "pulse_interval": self.pulse_interval,
+                **({"pulse_mode": self.pulse_mode} if self.pulse_mode != "double" else {}),
+                **({"total_width": self.total_width} if self.total_width is not None else {}),
+            },
+            "awg": {
+                "frequency": self.frequency,
+                "period": self.period,
+                "trigger_delay": self.trigger_delay,
+                "waveform_mode": self.waveform_mode,
+            },
+        }
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            toml.dump(data, f)
+
+    def validate(self) -> list[str]:
+        """Validate parameter consistency."""
+        logger.info("Running validation")
+        errors = self._validate_common()
+
+        if self.pulse_mode not in ("double", "triple", "quad"):
+            errors.append(
+                f"pulse_mode must be 'double', 'triple', or 'quad', got '{self.pulse_mode}'"
+            )
+        if self.pulse_width <= 0:
+            errors.append("pulse_width must be positive")
+        if self.pulse_interval < 0:
+            errors.append("pulse_interval must be >= 0")
+
+        # Pulse group must fit within one period
+        if self.frequency > 0 and self.pulse_width > 0 and self.pulse_interval >= 0:
+            if self.pulse_mode == "quad":
+                if self.total_width is None:
+                    errors.append("total_width is required for quad pulse mode")
+                else:
+                    if self.total_width <= 4 * self.pulse_width:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s must be > "
+                            f"4×pulse_width = {4 * self.pulse_width:.4e} s"
+                        )
+                    b = self.total_width - 4 * self.pulse_width - 2 * self.pulse_interval
+                    if b <= 0:
+                        errors.append(
+                            f"gap b = total_width - 4×pw - 2×a = {b:.4e} s must be > 0"
+                        )
+                    if self.total_width >= self.period:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s "
+                            f"exceeds period = {self.period:.4e} s"
+                        )
+            else:
+                n = 3 if self.pulse_mode == "triple" else 2
+                group_total = n * self.pulse_width + (n - 1) * self.pulse_interval
+                if group_total >= self.period:
+                    errors.append(
+                        f"{n}×pulse_width + {n-1}×interval = {group_total:.4e} s "
+                        f"exceeds period = {self.period:.4e} s"
+                    )
+
+        # Arbitrary-mode specific checks
+        if self.waveform_mode == "arbitrary":
+            from core import _calc_arb_params
+
+            arb_intervals = [self.pulse_interval]
+            if self.pulse_mode == "quad" and self.total_width is not None:
+                arb_intervals.append(self.total_width)
+            try:
+                sample_rate, points_per_period = _calc_arb_params(
+                    self.frequency, [self.pulse_width],
+                    intervals=arb_intervals,
+                )
+                if sample_rate < 10e6 or sample_rate > 4.2e9:
+                    errors.append(
+                        f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
+                        "is out of range (10 MSa/s – 4.2 GSa/s)"
+                    )
+                if points_per_period < 320:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "is too short (must be >= 320)"
+                    )
+                if points_per_period % 32 != 0:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "must be a multiple of 32"
+                    )
+            except ValueError as exc:
+                errors.append(f"Arbitrary mode parameter error: {exc}")
+
+        for e in errors:
+            logger.warning("Validation error: %s", e)
+
+        return errors
+
+
+@dataclass
+class IntervalSweepConfig(BaseConfig):
+    """Pulse interval sweep configuration for pump-probe mode."""
+
+    # Fixed pulse width (same for both pulses)
+    pulse_width: float
+
+    # Interval sweep parameters [s]
+    interval_start: float
+    interval_stop: float
+    interval_step: float
+
+    # Sweep control
+    wait_time: float
+    waveform_mode: str = "arbitrary"
+    settling_time: float = 0.0
+    trigger_delay_stop: int | None = None
+    delay_exponent: float = 1.0
+    delay_mode: str = "exponent"  # "exponent" | "table"
+    delay_table: list[tuple[float, int]] | None = None  # [(interval_s, delay_pts), ...]
+    step_zones: list[tuple[float, float]] | None = None
+    pulse_mode: str = "double"          # "double" | "triple" | "quad"
+    total_width: float | None = None    # Total width [s] for quad mode
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> IntervalSweepConfig:
+        """Load configuration from a TOML file."""
+        flat = cls._load_and_flatten_toml(path)
+        if "delay_table" in flat and flat["delay_table"] is not None:
+            flat["delay_table"] = [
+                (float(row[0]), int(row[1])) for row in flat["delay_table"]
+            ]
+        if "step_zones" in flat and flat["step_zones"] is not None:
+            flat["step_zones"] = [
+                (float(row[0]), float(row[1])) for row in flat["step_zones"]
+            ]
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in flat.items() if k in valid_keys}
+        return cls(**filtered)
+
+    def to_toml(self, path: str | Path) -> None:
+        """Export to a TOML file."""
+        logger.info("Writing TOML: %s", path)
+        data = {
+            "connection": {
+                "visa_address": self.visa_address,
+            },
+            "pulse": {
+                "v_on": self.v_on,
+                "v_off": self.v_off,
+                "pulse_width": self.pulse_width,
+            },
+            "interval_sweep": {
+                "interval_start": self.interval_start,
+                "interval_stop": self.interval_stop,
+                "interval_step": self.interval_step,
+                "wait_time": self.wait_time,
+                "settling_time": self.settling_time,
+                **({"trigger_delay_stop": self.trigger_delay_stop}
+                   if self.trigger_delay_stop is not None else {}),
+                **({"delay_exponent": self.delay_exponent}
+                   if self.delay_exponent != 1.0 else {}),
+                **({"delay_mode": self.delay_mode}
+                   if self.delay_mode != "exponent" else {}),
+                **({"delay_table": [list(row) for row in self.delay_table]}
+                   if self.delay_table is not None else {}),
+                **({"step_zones": [list(row) for row in self.step_zones]}
+                   if self.step_zones is not None else {}),
+                **({"pulse_mode": self.pulse_mode} if self.pulse_mode != "double" else {}),
+                **({"total_width": self.total_width} if self.total_width is not None else {}),
+            },
+            "awg": {
+                "frequency": self.frequency,
+                "period": self.period,
+                "trigger_delay": self.trigger_delay,
+                "waveform_mode": self.waveform_mode,
+            },
+        }
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            toml.dump(data, f)
+
+    def validate(self) -> list[str]:
+        """Validate parameter consistency."""
+        logger.info("Running validation")
+        errors = self._validate_common()
+
+        if self.pulse_width <= 0:
+            errors.append("pulse_width must be positive")
+        if self.interval_start < 0:
+            errors.append("interval_start must be >= 0")
+        if self.interval_stop < 0:
+            errors.append("interval_stop must be >= 0")
+        if self.interval_step <= 0:
+            errors.append("interval_step must be positive")
+
+        if self.wait_time < 0:
+            errors.append("wait_time must be >= 0")
+        if self.settling_time < 0:
+            errors.append("settling_time must be >= 0")
+
+        if self.pulse_mode not in ("double", "triple", "quad"):
+            errors.append(
+                f"pulse_mode must be 'double', 'triple', or 'quad', got '{self.pulse_mode}'"
+            )
+
+        # Pulse group must fit within one period (check with largest interval)
+        if self.frequency > 0 and self.pulse_width > 0:
+            if self.pulse_mode == "quad":
+                if self.total_width is None:
+                    errors.append("total_width is required for quad pulse mode")
+                else:
+                    if self.total_width <= 4 * self.pulse_width:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s must be > "
+                            f"4×pulse_width = {4 * self.pulse_width:.4e} s"
+                        )
+                    b_min = self.total_width - 4 * self.pulse_width - 2 * self.interval_stop
+                    if b_min <= 0:
+                        errors.append(
+                            f"gap b at interval_stop = {b_min:.4e} s must be > 0 "
+                            f"(total_width - 4×pw - 2×interval_stop)"
+                        )
+                    if self.total_width >= self.period:
+                        errors.append(
+                            f"total_width = {self.total_width:.4e} s "
+                            f"exceeds period = {self.period:.4e} s"
+                        )
+            else:
+                n = 3 if self.pulse_mode == "triple" else 2
+                group_total = n * self.pulse_width + (n - 1) * self.interval_stop
+                if group_total >= self.period:
+                    errors.append(
+                        f"{n}×pulse_width + {n-1}×interval_stop = {group_total:.4e} s "
+                        f"exceeds period = {self.period:.4e} s"
+                    )
+
+        # Delay mode validation
+        if self.delay_mode not in ("exponent", "table"):
+            errors.append(
+                f"delay_mode must be 'exponent' or 'table', got '{self.delay_mode}'"
+            )
+
+        if self.delay_mode == "exponent":
+            if self.trigger_delay_stop is not None:
+                if self.trigger_delay_stop < 0:
+                    errors.append("trigger_delay_stop must be >= 0")
+                if self.trigger_delay_stop % 8 != 0:
+                    errors.append("trigger_delay_stop must be a multiple of 8")
+            if abs(self.delay_exponent) < 0.25 or abs(self.delay_exponent) > 4.0:
+                errors.append(
+                    f"delay_exponent abs must be 0.25–4.0, got {self.delay_exponent}"
+                )
+
+        if self.delay_mode == "table":
+            if self.delay_table is None or len(self.delay_table) < 2:
+                errors.append(
+                    "delay_table must have at least 2 entries for table mode"
+                )
+            elif self.delay_table is not None:
+                table_ivs = [row[0] for row in self.delay_table]
+                table_min = min(table_ivs)
+                table_max = max(table_ivs)
+                if self.interval_start < table_min or self.interval_start > table_max:
+                    errors.append(
+                        f"interval_start ({self.interval_start:.4e} s) is outside "
+                        f"delay table range ({table_min:.4e}–{table_max:.4e} s). "
+                        "Extrapolation is not allowed."
+                    )
+                if self.interval_stop < table_min or self.interval_stop > table_max:
+                    errors.append(
+                        f"interval_stop ({self.interval_stop:.4e} s) is outside "
+                        f"delay table range ({table_min:.4e}–{table_max:.4e} s). "
+                        "Extrapolation is not allowed."
+                    )
+
+        if self.step_zones:
+            boundaries = [b for b, _ in self.step_zones]
+            if boundaries != sorted(boundaries):
+                errors.append("step_zones boundaries must be in ascending order")
+            for b, s in self.step_zones:
+                if s <= 0:
+                    errors.append(f"step_zones step must be positive, got {s}")
+                if b <= self.interval_start or b >= self.interval_stop:
+                    errors.append(
+                        f"step_zones boundary {b:.4e} must be between "
+                        f"interval_start ({self.interval_start:.4e}) and "
+                        f"interval_stop ({self.interval_stop:.4e})"
+                    )
+
+        # Arbitrary-mode specific checks
+        if self.waveform_mode == "arbitrary":
+            from core import _calc_arb_params, _generate_widths
+
+            intervals = _generate_widths(
+                self.interval_start, self.interval_stop, self.interval_step,
+                step_zones=self.step_zones,
+            )
+            try:
+                sample_rate, points_per_period = _calc_arb_params(
+                    self.frequency, [self.pulse_width], intervals=intervals,
+                )
+                if sample_rate < 10e6 or sample_rate > 4.2e9:
+                    errors.append(
+                        f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
+                        "is out of range (10 MSa/s – 4.2 GSa/s)"
+                    )
+                if points_per_period < 320:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "is too short (must be >= 320)"
+                    )
+                if points_per_period % 32 != 0:
+                    errors.append(
+                        f"Arbitrary mode segment length = {points_per_period} "
+                        "must be a multiple of 32"
+                    )
+            except ValueError as exc:
+                errors.append(f"Arbitrary mode parameter error: {exc}")
+
+        for e in errors:
+            logger.warning("Validation error: %s", e)
+
+        return errors
+
+
 # ================================================================== #
 #  Unified TOML (single format for all modes)
 # ================================================================== #
@@ -494,6 +920,26 @@ def load_unified_toml(path: str | Path) -> dict:
         ws["delay_exponent"] = -1.0 if _interp == "inverse_width" else 1.0
     elif "delay_interp" in ws:
         ws.pop("delay_interp")
+    # Convert delay_table from list-of-lists to list-of-tuples
+    if "delay_table" in ws and ws["delay_table"] is not None:
+        ws["delay_table"] = [
+            (float(row[0]), int(row[1])) for row in ws["delay_table"]
+        ]
+    # Convert step_zones from list-of-lists to list-of-tuples
+    if "step_zones" in ws and ws["step_zones"] is not None:
+        ws["step_zones"] = [
+            (float(row[0]), float(row[1])) for row in ws["step_zones"]
+        ]
+    # Interval sweep section
+    isw = data.get("interval_sweep", {})
+    if "delay_table" in isw and isw["delay_table"] is not None:
+        isw["delay_table"] = [
+            (float(row[0]), int(row[1])) for row in isw["delay_table"]
+        ]
+    if "step_zones" in isw and isw["step_zones"] is not None:
+        isw["step_zones"] = [
+            (float(row[0]), float(row[1])) for row in isw["step_zones"]
+        ]
     return data
 
 

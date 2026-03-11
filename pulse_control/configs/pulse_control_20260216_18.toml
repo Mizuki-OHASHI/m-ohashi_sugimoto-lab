@@ -1,0 +1,59 @@
+[save]
+save_dir = "configs"
+filename_format = "pulse_control_20260216_"
+
+[connection]
+visa_address = "TCPIP0::192.168.0.251::5025::SOCKET"
+
+[common]
+v_on = 0.13
+v_off = 2.13
+frequency = 2500000.0
+period = 4e-7
+trigger_delay = 2992
+resolution_n = 4
+
+[simple_pulse]
+pulse_width = 1.2000000000000002e-7
+saved_records = [ [ 2.5e-9, 3680.0,], [ 1e-8, 3680.0,], [ 2e-8, 3680.0,], [ 4e-8, 3688.0,], [ 8e-8, 3688.0,], [ 1.2000000000000002e-7, 3688.0,],]
+
+[width_sweep]
+width_start = 2.5e-9
+width_stop = 1.2000000000000002e-7
+width_step = 1e-8
+wait_time = 1.0
+settling_time = 0.1
+trigger_delay_stop = 3208
+step_zones = [ [ 4e-8, 2.5e-9,],]
+
+[delay_sweep]
+pulse_width = 1e-8
+wait_time = 0.04
+delay_start = 0
+delay_stop = 6400
+delay_step = 16
+settling_time = 2.0
+
+[pump_probe]
+pulse_width = 2e-8
+pulse_interval = 3.2e-7
+saved_records = [ [ 0.0, 2984.0,], [ 2e-8, 2992.0,], [ 4e-8, 2992.0,], [ 8e-8, 2992.0,], [ 1.6e-7, 2992.0,], [ 3.2e-7, 2992.0,],]
+
+[interval_sweep]
+pulse_width = 2e-8
+interval_start = 0.0
+interval_stop = 3.2e-7
+interval_step = 2e-8
+wait_time = 2.0
+settling_time = 1.0
+trigger_delay_stop = 0
+delay_mode = "table"
+delay_table = [ [ 0.0, 2984.0,], [ 2e-8, 2992.0,], [ 4e-8, 2992.0,], [ 8e-8, 2992.0,], [ 1.6e-7, 2992.0,], [ 3.2e-7, 2992.0,],]
+
+[integration]
+dmm_visa_address = "ASRL3::INSTR"
+trigger_start_voltage = -9.9
+trigger_end_voltage = -9.5
+sweep_start_voltage = -9.4
+poll_interval = 0.2
+num_cycles = 0
