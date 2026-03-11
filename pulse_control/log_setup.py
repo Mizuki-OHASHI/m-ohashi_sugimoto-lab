@@ -11,7 +11,7 @@ Usage:
 from __future__ import annotations
 
 from datetime import datetime
-from logging import DEBUG, FileHandler, Formatter, StreamHandler, getLogger
+from logging import DEBUG, INFO, FileHandler, Formatter, StreamHandler, getLogger
 from pathlib import Path
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -50,7 +50,7 @@ def setup_logging() -> None:
     file_handler.setFormatter(formatter)
 
     stream_handler = StreamHandler()
-    stream_handler.setLevel(DEBUG)
+    stream_handler.setLevel(INFO)  # DEBUG→INFO: suppress per-SCPI-command logs from stdout
     stream_handler.setFormatter(formatter)
 
     root.setLevel(DEBUG)

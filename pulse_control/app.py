@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import csv
+import gc
 import re
 import tempfile
 import time
@@ -19,6 +20,7 @@ import streamlit as st
 from config import (
     DEFAULT_VISA_ADDRESS,
     DelaySweepConfig,
+    GridSweepConfig,
     IntervalSweepConfig,
     PulseConfig,
     PumpProbeConfig,
@@ -30,9 +32,11 @@ from config import (
 from core import (
     PulseInstrument,
     _calc_arb_params,
+    _generate_delays,
     _generate_intervals,
     _generate_widths,
     run_delay_sweep,
+    run_grid_sweep,
     run_interval_sweep,
     run_sweep,
 )
@@ -193,6 +197,7 @@ _ws = ucfg.get("width_sweep", {})
 _ds = ucfg.get("delay_sweep", {})
 _pp = ucfg.get("pump_probe", {})
 _isw = ucfg.get("interval_sweep", {})
+_gs = ucfg.get("grid_sweep", {})
 _ig = ucfg.get("integration", {})
 _ss = ucfg.get("step_sync", {})
 
@@ -236,6 +241,7 @@ def _load_config_to_widgets(data: dict) -> None:
     sp = data.get("simple_pulse", {})
     ws = data.get("width_sweep", {})
     ds = data.get("delay_sweep", {})
+    gs = data.get("grid_sweep", {})
     pp = data.get("pump_probe", {})
     isw = data.get("interval_sweep", {})
     ig = data.get("integration", {})
@@ -324,6 +330,40 @@ def _load_config_to_widgets(data: dict) -> None:
     st.session_state._w_delay_step = ds.get("delay_step", 8)
     st.session_state._w_delay_wait_time = format_si(ds.get("wait_time", 1.0))
     st.session_state._w_delay_settling_time = ds.get("settling_time", 0.0)
+
+    # Grid Sweep
+    st.session_state._w_grid_width_start = format_si(gs.get("width_start", 2.5e-9))
+    st.session_state._w_grid_width_stop = format_si(gs.get("width_stop", 1.6e-7))
+    st.session_state._w_grid_width_step = format_si(gs.get("width_step", 5e-9))
+    st.session_state._w_grid_delay_start = gs.get("delay_start", 0)
+    st.session_state._w_grid_delay_stop = gs.get("delay_stop", 6400)
+    st.session_state._w_grid_delay_step = gs.get("delay_step", 16)
+    st.session_state._w_grid_wait_time = format_si(gs.get("wait_time", 1.0))
+    st.session_state._w_grid_settling_time = gs.get("settling_time", 0.0)
+    _gs_order = gs.get("sweep_order", "width_outer")
+    st.session_state._w_grid_sweep_order = (
+        "Width outer" if _gs_order == "width_outer" else "Delay outer")
+    _gsz = gs.get("step_zones", [])
+    st.session_state._w_grid_variable_step = bool(_gsz)
+    if _gsz:
+        gz1 = _gsz[0] if len(_gsz) >= 1 else [None, None]
+        st.session_state._w_grid_step_zone1_boundary = (
+            format_si(gz1[0]) if gz1[0] is not None else "")
+        st.session_state._w_grid_step_zone1_step = (
+            format_si(gz1[1]) if gz1[1] is not None else "")
+        gz2 = _gsz[1] if len(_gsz) >= 2 else [None, None]
+        st.session_state._w_grid_step_zone2_boundary = (
+            format_si(gz2[0]) if gz2[0] is not None else "")
+        st.session_state._w_grid_step_zone2_step = (
+            format_si(gz2[1]) if gz2[1] is not None else "")
+
+    # Grid Sweep - Integration (Auto Sweep)
+    st.session_state._g_ig_dmm_address = ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS)
+    st.session_state._g_ig_poll_interval = ig.get("poll_interval", 1.0)
+    st.session_state._g_ig_num_cycles = ig.get("num_cycles", 0)
+    st.session_state._g_ig_trigger_start = ig.get("trigger_start_voltage", -9.8)
+    st.session_state._g_ig_trigger_end = ig.get("trigger_end_voltage", -9.2)
+    st.session_state._g_ig_sweep_start = ig.get("sweep_start_voltage", -9.0)
 
     # Pump-Probe
     st.session_state._w_pp_pulse_width = format_si(pp.get("pulse_width", 1e-8))
@@ -665,9 +705,11 @@ except (ValueError, KeyError):
 pulse_config: PulseConfig | None = None
 sweep_config_built: SweepConfig | None = None
 delay_config_built: DelaySweepConfig | None = None
+grid_config_built: GridSweepConfig | None = None
 pulse_parse_errors: list[str] = []
 sweep_parse_errors: list[str] = []
 delay_parse_errors: list[str] = []
+grid_parse_errors: list[str] = []
 
 # Tab locking: prevent switching tabs while output is running
 _sp_running = st.session_state.get("ch1_running") or st.session_state.get("ch2_running")
@@ -678,8 +720,9 @@ _active_output_tab: str | None = (
     None
 )
 
-tab_pulse, tab_pp, tab_sweep, tab_isweep, tab_delay = st.tabs([
+tab_pulse, tab_pp, tab_sweep, tab_isweep, tab_delay, tab_grid = st.tabs([
     "Simple Pulse", "Pump-Probe", "Width Sweep", "Interval Sweep", "Delay Sweep",
+    "Grid Sweep",
 ])
 
 # ================================================================== #
@@ -3019,6 +3062,530 @@ with tab_delay:
 
 
 # ================================================================== #
+#  Grid Sweep tab
+# ================================================================== #
+with tab_grid:
+    if _active_output_tab is not None and _active_output_tab != "grid_sweep":
+        _mode_label = "Simple Pulse" if _sp_running else "Pump-Probe"
+        _chs = [str(ch) for ch in [1, 2]
+                if st.session_state.get(f"ch{ch}_running")
+                or st.session_state.get(f"pp_ch{ch}_running")]
+        st.warning(
+            f"{_mode_label} output is running (CH{', '.join(_chs)}). "
+            "Stop output before switching modes."
+        )
+    else:
+        col_gw, col_gd, col_go = st.columns([2, 2, 2])
+
+        with col_gw:
+            st.subheader("Width Axis")
+            st.session_state.setdefault("_w_grid_width_start", format_si(_gs.get("width_start", 2.5e-9)))
+            st.text_input("Width Start [s]", key="_w_grid_width_start")
+            st.session_state.setdefault("_w_grid_width_stop", format_si(_gs.get("width_stop", 1.6e-7)))
+            st.text_input("Width Stop [s]", key="_w_grid_width_stop")
+            st.session_state.setdefault("_w_grid_width_step", format_si(_gs.get("width_step", 5e-9)))
+            st.text_input("Width Step [s]", key="_w_grid_width_step")
+
+            # Variable step zones
+            st.session_state.setdefault("_w_grid_variable_step", False)
+            _grid_vstep = st.checkbox("Variable step", key="_w_grid_variable_step")
+            if _grid_vstep:
+                with st.expander("Step Zones"):
+                    st.session_state.setdefault("_w_grid_step_zone1_boundary", "")
+                    st.session_state.setdefault("_w_grid_step_zone1_step", "")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.text_input("Zone 1 boundary [s]", key="_w_grid_step_zone1_boundary")
+                    with c2:
+                        st.text_input("Zone 1 step [s]", key="_w_grid_step_zone1_step")
+                    st.session_state.setdefault("_w_grid_step_zone2_boundary", "")
+                    st.session_state.setdefault("_w_grid_step_zone2_step", "")
+                    c3, c4 = st.columns(2)
+                    with c3:
+                        st.text_input("Zone 2 boundary [s]", key="_w_grid_step_zone2_boundary")
+                    with c4:
+                        st.text_input("Zone 2 step [s]", key="_w_grid_step_zone2_step")
+
+        with col_gd:
+            st.subheader("Delay Axis")
+            st.session_state.setdefault("_w_grid_delay_start", _gs.get("delay_start", 0))
+            st.number_input(
+                "Delay Start [points] (×8)", min_value=0, step=8,
+                key="_w_grid_delay_start",
+            )
+            st.session_state.setdefault("_w_grid_delay_stop", _gs.get("delay_stop", 6400))
+            st.number_input(
+                "Delay Stop [points] (×8)", min_value=0, step=8,
+                key="_w_grid_delay_stop",
+            )
+            st.session_state.setdefault("_w_grid_delay_step", _gs.get("delay_step", 16))
+            st.number_input(
+                "Delay Step [points] (×8)", min_value=8, step=8,
+                key="_w_grid_delay_step",
+            )
+
+        with col_go:
+            st.subheader("Options")
+            st.session_state.setdefault("_w_grid_wait_time", format_si(_gs.get("wait_time", 1.0)))
+            st.text_input("Wait Time [s]", key="_w_grid_wait_time")
+            st.session_state.setdefault("_w_grid_settling_time", _gs.get("settling_time", 0.0))
+            grid_settling_time = st.number_input(
+                "Settling Time [s]", min_value=0.0, step=1.0, format="%.1f",
+                key="_w_grid_settling_time",
+            )
+            st.session_state.setdefault("_w_grid_sweep_order", "Width outer")
+            st.radio(
+                "Sweep Order", ["Width outer", "Delay outer"],
+                key="_w_grid_sweep_order",
+                help="Width outer: for each width, sweep all delays. "
+                     "Delay outer: for each delay, sweep all widths.",
+            )
+            grid_channel = st.radio(
+                "Channel", ["CH1", "CH2", "Both"], horizontal=True, key="_grid_ch",
+            )
+
+        # Parse grid-specific fields
+        grid_parse_errors = list(common_parse_errors)
+        grid_parsed = dict(common_parsed)
+
+        for _gname, _gkey, _gdef in [
+            ("width_start", "_w_grid_width_start", 2.5e-9),
+            ("width_stop", "_w_grid_width_stop", 1.6e-7),
+            ("width_step", "_w_grid_width_step", 5e-9),
+            ("wait_time", "_w_grid_wait_time", 1.0),
+        ]:
+            try:
+                grid_parsed[_gname] = parse_si(st.session_state.get(_gkey, format_si(_gdef)))
+            except (ValueError, KeyError):
+                grid_parse_errors.append(
+                    f"{_gname}: invalid value \"{st.session_state.get(_gkey, '')}\""
+                )
+
+        grid_delay_start = int(st.session_state.get("_w_grid_delay_start", 0))
+        grid_delay_stop = int(st.session_state.get("_w_grid_delay_stop", 6400))
+        grid_delay_step = int(st.session_state.get("_w_grid_delay_step", 16))
+
+        # Step zones
+        grid_step_zones: list[tuple[float, float]] | None = None
+        if st.session_state.get("_w_grid_variable_step", False):
+            _gsz_list: list[tuple[float, float]] = []
+            for _zn in ("zone1", "zone2"):
+                _b = st.session_state.get(f"_w_grid_step_{_zn}_boundary", "").strip()
+                _s = st.session_state.get(f"_w_grid_step_{_zn}_step", "").strip()
+                if _b and _s:
+                    try:
+                        _gsz_list.append((parse_si(_b), parse_si(_s)))
+                    except ValueError:
+                        grid_parse_errors.append(f"step zone {_zn}: invalid value")
+            if _gsz_list:
+                grid_step_zones = _gsz_list
+
+        # Sweep order
+        _grid_order_val = (
+            "width_outer" if st.session_state.get("_w_grid_sweep_order") == "Width outer"
+            else "delay_outer"
+        )
+
+        # Build config
+        if not grid_parse_errors:
+            grid_config_built = GridSweepConfig(
+                visa_address=visa_address,
+                v_on=v_on,
+                v_off=v_off,
+                frequency=grid_parsed["frequency"],
+                trigger_delay=grid_delay_start,
+                resolution_n=int(resolution_n),
+                width_start=grid_parsed["width_start"],
+                width_stop=grid_parsed["width_stop"],
+                width_step=grid_parsed["width_step"],
+                step_zones=grid_step_zones,
+                delay_start=grid_delay_start,
+                delay_stop=grid_delay_stop,
+                delay_step=grid_delay_step,
+                wait_time=grid_parsed["wait_time"],
+                settling_time=grid_settling_time,
+                sweep_order=_grid_order_val,
+            )
+
+        # Validation
+        errors_grid = list(grid_parse_errors)
+        if grid_config_built is not None:
+            errors_grid.extend(grid_config_built.validate())
+
+        if errors_grid:
+            st.error("Configuration error:\n" + "\n".join(f"- {e}" for e in errors_grid))
+        else:
+            st.success("Parameters OK")
+            if grid_config_built is not None:
+                widths_grid = _generate_widths(
+                    grid_config_built.width_start,
+                    grid_config_built.width_stop,
+                    grid_config_built.width_step,
+                    step_zones=grid_config_built.step_zones,
+                )
+                delays_grid = _generate_delays(
+                    grid_config_built.delay_start,
+                    grid_config_built.delay_stop,
+                    grid_config_built.delay_step,
+                )
+                n_w = len(widths_grid)
+                n_d = len(delays_grid)
+                total_grid = n_w * n_d
+                est_time = total_grid * grid_config_built.wait_time
+                st.info(
+                    f"Grid: {n_w} widths × {n_d} delays = **{total_grid} steps** "
+                    f"(~{est_time:.1f} s)"
+                )
+                _show_arb_info(
+                    grid_config_built.frequency, widths_grid,
+                    resolution_n=resolution_n,
+                )
+
+        # Run grid sweep
+        if st.button("Start Grid Sweep",
+                      disabled=bool(errors_grid) or not visa_address,
+                      type="primary", key="_btn_start_grid_sweep"):
+            config = grid_config_built
+            channels = _CHANNEL_MAP[grid_channel]
+            logger.info("Grid sweep started (channels=%s, order=%s)",
+                        channels, config.sweep_order)
+            progress = st.progress(0, text="Connecting...")
+
+            instrument = None
+            try:
+                instrument = PulseInstrument(config.visa_address)
+                progress.progress(0, text="Uploading waveform segments...")
+
+                widths = _generate_widths(
+                    config.width_start, config.width_stop, config.width_step,
+                    step_zones=config.step_zones,
+                )
+
+                def on_grid_upload(i: int, total: int) -> None:
+                    pct = (i + 1) / total
+                    progress.progress(pct, text=f"Uploading segment {i + 1}/{total}...")
+
+                for ch in channels:
+                    instrument.setup_arbitrary(
+                        config, widths, channel=ch, callback=on_grid_upload,
+                    )
+
+                # Settling phase
+                if config.settling_time > 0:
+                    t0 = time.time()
+                    while (elapsed := time.time() - t0) < config.settling_time:
+                        pct = elapsed / config.settling_time
+                        progress.progress(
+                            pct,
+                            text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                        )
+                        time.sleep(0.2)
+
+                sweep_start = time.time()
+
+                def on_grid_step(i: int, total: int) -> None:
+                    pct = (i + 1) / total
+                    elapsed = time.time() - sweep_start
+                    rate = (i + 1) / elapsed if elapsed > 0 else 0
+                    remaining = (total - i - 1) / rate if rate > 0 else 0
+                    progress.progress(
+                        pct,
+                        text=(
+                            f"Sweeping... {i + 1}/{total}"
+                            f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                        ),
+                    )
+
+                run_grid_sweep(config, instrument, callback=on_grid_step, channels=channels)
+
+                for ch in channels:
+                    instrument.teardown(channel=ch)
+
+                progress.progress(1.0, text="Done!")
+                logger.info("Grid sweep completed")
+
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                logger.exception("Error during grid sweep")
+            finally:
+                if instrument is not None:
+                    instrument.close()
+
+        # ============================================================ #
+        #  Auto Sweep (Voltage-Triggered) for Grid Sweep
+        # ============================================================ #
+        st.divider()
+        st.text("Auto Sweep (Voltage-Triggered)")
+
+        g_ig_mode_col, g_ig_common_col = st.columns([1, 2])
+
+        with g_ig_mode_col:
+            with st.expander(f"DMM Settings ({_ig.get('dmm_visa_address', DEFAULT_34401A_ADDRESS)})", expanded=False):
+                st.session_state.setdefault("_g_ig_dmm_address", _ig.get("dmm_visa_address", DEFAULT_34401A_ADDRESS))
+                st.text_input(
+                    "DMM VISA Address",
+                    key="_g_ig_dmm_address",
+                )
+                _g_dmm_btn1, _g_dmm_btn2 = st.columns(2)
+                with _g_dmm_btn1:
+                    if st.button("Check DMM", key="_btn_grid_check_dmm", use_container_width=True):
+                        with st.spinner("Checking DMM..."):
+                            try:
+                                idn = Multimeter.check_connection(
+                                    st.session_state.get("_g_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+                                )
+                                st.success(f"DMM OK: {idn}")
+                            except Exception as exc:
+                                st.error(f"DMM failed: {exc}")
+                with _g_dmm_btn2:
+                    if st.button("Read Once", key="_btn_grid_dmm_read_once", use_container_width=True):
+                        with st.spinner("Reading..."):
+                            try:
+                                _dmm_addr = st.session_state.get("_g_ig_dmm_address", DEFAULT_34401A_ADDRESS)
+                                _dmm = Multimeter(_dmm_addr)
+                                _dmm.configure_dc_voltage()
+                                _val = _dmm.read()
+                                _dmm.close()
+                                with st.container(border=True):
+                                    st.text(f"DMM Voltage: {_val:.4f} V")
+                            except Exception as exc:
+                                st.error(f"DMM read failed: {exc}")
+
+        with g_ig_common_col:
+            _gc1, _gc2 = st.columns(2)
+            with _gc1:
+                st.session_state.setdefault("_g_ig_poll_interval", _ig.get("poll_interval", 1.0))
+                g_ig_poll_interval = st.number_input(
+                    "Poll Interval [s]",
+                    min_value=0.1, step=0.5, format="%.1f",
+                    key="_g_ig_poll_interval",
+                    help="Interval between DMM voltage readings.",
+                )
+            with _gc2:
+                st.session_state.setdefault("_g_ig_num_cycles", _ig.get("num_cycles", 0))
+                g_ig_num_cycles = st.number_input(
+                    "Cycles (0 = infinite)",
+                    min_value=0, step=1,
+                    key="_g_ig_num_cycles",
+                    help="Number of detect-then-sweep cycles. Set 0 for infinite loop (stop by reloading the page).",
+                )
+
+        _gr1, _gr2, _gr3 = st.columns(3)
+        with _gr1:
+            st.session_state.setdefault("_g_ig_trigger_start", _ig.get("trigger_start_voltage", -9.8))
+            g_ig_trigger_start = st.number_input(
+                "Trigger Start [V]",
+                format="%.2f",
+                key="_g_ig_trigger_start",
+                help="Start collecting fit data when voltage crosses this value upward.",
+            )
+        with _gr2:
+            st.session_state.setdefault("_g_ig_trigger_end", _ig.get("trigger_end_voltage", -9.2))
+            g_ig_trigger_end = st.number_input(
+                "Trigger End [V]",
+                format="%.2f",
+                key="_g_ig_trigger_end",
+                help="Stop collecting and perform linear fit at this voltage.",
+            )
+        with _gr3:
+            st.session_state.setdefault("_g_ig_sweep_start", _ig.get("sweep_start_voltage", -9.0))
+            g_ig_sweep_start = st.number_input(
+                "Sweep Start [V]",
+                format="%.2f",
+                key="_g_ig_sweep_start",
+                help="Predicted voltage at which the sweep begins.",
+            )
+
+        # Build and validate IntegrationConfig
+        g_ig_config: IntegrationConfig | None = None
+        g_ig_errors: list[str] = []
+
+        if not errors_grid and grid_config_built is not None:
+            g_ig_config = IntegrationConfig(
+                dmm_visa_address=st.session_state.get("_g_ig_dmm_address", DEFAULT_34401A_ADDRESS),
+                trigger_start_voltage=float(g_ig_trigger_start),
+                trigger_end_voltage=float(g_ig_trigger_end),
+                sweep_start_voltage=float(g_ig_sweep_start),
+                poll_interval=float(g_ig_poll_interval),
+                num_cycles=int(g_ig_num_cycles),
+            )
+            g_ig_errors = g_ig_config.validate()
+
+        if g_ig_errors:
+            st.error("Integration config error:\n" + "\n".join(f"- {e}" for e in g_ig_errors))
+
+        can_start_auto_grid = (
+            not bool(errors_grid)
+            and not bool(g_ig_errors)
+            and bool(visa_address)
+            and grid_config_built is not None
+            and g_ig_config is not None
+        )
+
+        if g_ig_num_cycles == 0:
+            st.caption("Cycles=0: runs until page is refreshed.")
+
+        if st.button(
+            "Start Auto Grid Sweep",
+            disabled=not can_start_auto_grid,
+            type="primary",
+            key="_btn_start_auto_grid_sweep",
+        ):
+            config = grid_config_built
+            integration = g_ig_config
+            channels = _CHANNEL_MAP[grid_channel]
+            logger.info("Auto grid sweep started (channels=%s, cycles=%s)", channels, integration.num_cycles)
+
+            cycle_status = st.empty()
+            phase_status = st.empty()
+            voltage_display = st.empty()
+            progress = st.progress(0)
+
+            instrument = None
+            dmm = None
+            try:
+                # Connect AWG
+                phase_status.info("Connecting to AWG...")
+                instrument = PulseInstrument(config.visa_address)
+
+                # Connect DMM
+                phase_status.info("Connecting to DMM...")
+                dmm = Multimeter(integration.dmm_visa_address)
+                dmm.configure_dc_voltage()
+
+                # Upload waveforms (once)
+                widths = _generate_widths(
+                    config.width_start, config.width_stop, config.width_step,
+                    step_zones=config.step_zones,
+                )
+
+                def on_auto_grid_upload(i: int, total: int) -> None:
+                    progress.progress(
+                        (i + 1) / total,
+                        text=f"Uploading segments... [{i + 1}/{total}]",
+                    )
+
+                for ch in channels:
+                    instrument.setup_arbitrary(config, widths, channel=ch, callback=on_auto_grid_upload)
+
+                # Settling phase (if configured)
+                if config.settling_time > 0:
+                    phase_status.info("Settling...")
+                    t0 = time.time()
+                    while (elapsed := time.time() - t0) < config.settling_time:
+                        pct = elapsed / config.settling_time
+                        progress.progress(
+                            pct,
+                            text=f"Settling... {elapsed:.1f}s / {config.settling_time:.1f}s",
+                        )
+                        time.sleep(0.2)
+
+                # Cycle loop
+                max_cycles = integration.num_cycles
+                cycle = 0
+
+                while max_cycles == 0 or cycle < max_cycles:
+                    cycle += 1
+                    label = f"{cycle}/{max_cycles}" if max_cycles > 0 else f"{cycle}/inf"
+                    cycle_status.markdown(f"**Cycle {label}**")
+
+                    # Phase A: Detect ramp start
+                    phase_status.info("Waiting for ramp...")
+                    progress.progress(0, text="Monitoring voltage...")
+
+                    def on_grid_ramp(voltage: float, phase: str) -> None:
+                        if phase == "waiting_low":
+                            voltage_display.metric(
+                                "DMM Voltage", f"{voltage:.4f} V",
+                                delta="waiting for low voltage",
+                            )
+                        elif phase == "waiting_trigger":
+                            voltage_display.metric(
+                                "DMM Voltage", f"{voltage:.4f} V",
+                                delta="waiting for ramp start",
+                            )
+                        else:  # collecting
+                            voltage_display.metric(
+                                "DMM Voltage", f"{voltage:.4f} V",
+                                delta="collecting fit data",
+                            )
+                            phase_status.info("Collecting ramp data for linear fit...")
+
+                    prediction = detect_ramp_start(dmm, integration, callback=on_grid_ramp)
+
+                    # Show prediction results
+                    voltage_display.empty()
+                    phase_status.info(
+                        f"Fit: slope={prediction.slope:.4f} V/s, "
+                        f"R\u00b2={prediction.r_squared:.4f}, "
+                        f"n={prediction.n_points} pts"
+                    )
+
+                    # Phase B: Wait for predicted sweep start time
+                    now = time.time()
+                    wait_seconds = max(0.0, prediction.sweep_start_time - now)
+                    if wait_seconds > 0:
+                        t0 = time.time()
+                        while (elapsed := time.time() - t0) < wait_seconds:
+                            pct = elapsed / wait_seconds
+                            remaining = wait_seconds - elapsed
+                            progress.progress(
+                                pct,
+                                text=f"Sweep starts in {remaining:.1f}s",
+                            )
+                            time.sleep(0.2)
+
+                    # Restore USER mode before sweep (2nd cycle onward)
+                    if cycle > 1:
+                        for ch in channels:
+                            instrument.restore_user_mode(config, channel=ch)
+
+                    # Phase C: Grid Sweep
+                    phase_status.info(f"Sweeping (cycle {label})...")
+                    voltage_display.empty()
+                    sweep_start = time.time()
+
+                    def on_auto_grid_step(i: int, total: int) -> None:
+                        pct = (i + 1) / total
+                        elapsed = time.time() - sweep_start
+                        rate = (i + 1) / elapsed if elapsed > 0 else 0
+                        remaining = (total - i - 1) / rate if rate > 0 else 0
+                        progress.progress(
+                            pct,
+                            text=(
+                                f"Sweeping... {i + 1}/{total}"
+                                f" ({elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining)"
+                            ),
+                        )
+
+                    run_grid_sweep(config, instrument, callback=on_auto_grid_step, channels=channels)
+                    logger.info("Auto grid sweep cycle %s complete", label)
+
+                    # Set DC 0V during wait (no pulses between cycles)
+                    for ch in channels:
+                        instrument.set_between_cycles_dc_zero(channel=ch)
+                    phase_status.info("Waiting (0V output)...")
+
+                # All cycles complete
+                for ch in channels:
+                    instrument.teardown(channel=ch)
+                cycle_status.success(f"Auto grid sweep complete ({cycle} cycle(s))")
+                phase_status.empty()
+                voltage_display.empty()
+                progress.progress(1.0, text="Done!")
+                logger.info("Auto grid sweep finished (%d cycles)", cycle)
+
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                logger.exception("Error during auto grid sweep")
+            finally:
+                if instrument is not None:
+                    instrument.close()
+                if dmm is not None:
+                    dmm.close()
+
+
+# ================================================================== #
 #  Sidebar: unified TOML save (after all tabs are built)
 # ================================================================== #
 
@@ -3125,6 +3692,38 @@ def _build_toml_data() -> dict:
     ds_data["delay_step"] = int(st.session_state.get("_w_delay_step", _ds.get("delay_step", 8)))
     ds_data["settling_time"] = float(st.session_state.get("_w_delay_settling_time", _ds.get("settling_time", 0.0)))
     data["delay_sweep"] = ds_data
+
+    # Grid Sweep section
+    gs_data: dict = {}
+    for name, key in (
+        ("width_start", "_w_grid_width_start"),
+        ("width_stop", "_w_grid_width_stop"),
+        ("width_step", "_w_grid_width_step"),
+        ("wait_time", "_w_grid_wait_time"),
+    ):
+        try:
+            gs_data[name] = parse_si(st.session_state.get(key, format_si(_gs.get(name, 0))))
+        except ValueError:
+            pass
+    gs_data["delay_start"] = int(st.session_state.get("_w_grid_delay_start", _gs.get("delay_start", 0)))
+    gs_data["delay_stop"] = int(st.session_state.get("_w_grid_delay_stop", _gs.get("delay_stop", 6400)))
+    gs_data["delay_step"] = int(st.session_state.get("_w_grid_delay_step", _gs.get("delay_step", 16)))
+    gs_data["settling_time"] = float(st.session_state.get("_w_grid_settling_time", _gs.get("settling_time", 0.0)))
+    _gs_order_export = st.session_state.get("_w_grid_sweep_order", "Width outer")
+    gs_data["sweep_order"] = "width_outer" if _gs_order_export == "Width outer" else "delay_outer"
+    if st.session_state.get("_w_grid_variable_step", False):
+        _gsz_save: list[list[float]] = []
+        for _zn in ("zone1", "zone2"):
+            _b = st.session_state.get(f"_w_grid_step_{_zn}_boundary", "").strip()
+            _s = st.session_state.get(f"_w_grid_step_{_zn}_step", "").strip()
+            if _b and _s:
+                try:
+                    _gsz_save.append([parse_si(_b), parse_si(_s)])
+                except ValueError:
+                    pass
+        if _gsz_save:
+            gs_data["step_zones"] = _gsz_save
+    data["grid_sweep"] = gs_data
 
     # Pump-Probe section
     pp_data: dict = {}
@@ -3272,6 +3871,13 @@ if "frequency" in common_parsed:
             sweep_config_built.width_step,
             step_zones=sweep_config_built.step_zones,
         )
+    elif grid_config_built is not None:
+        _arb_widths = _generate_widths(
+            grid_config_built.width_start,
+            grid_config_built.width_stop,
+            grid_config_built.width_step,
+            step_zones=grid_config_built.step_zones,
+        )
     elif delay_config_built is not None:
         _arb_widths = [delay_config_built.pulse_width]
     elif pulse_config is not None:
@@ -3300,6 +3906,8 @@ _all_parse_errors = common_parse_errors + [
     e for e in (sweep_parse_errors or []) if e not in common_parse_errors
 ] + [
     e for e in (delay_parse_errors or []) if e not in common_parse_errors
+] + [
+    e for e in (grid_parse_errors or []) if e not in common_parse_errors
 ]
 _save_dir = st.session_state.get("_w_save_dir", "").strip()
 _fn_fmt = st.session_state.get("_w_filename_format", "").strip()

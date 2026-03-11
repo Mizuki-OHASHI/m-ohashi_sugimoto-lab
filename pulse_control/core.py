@@ -10,7 +10,13 @@ from typing import Callable
 import numpy as np
 import pyvisa
 
-from config import BaseConfig, DelaySweepConfig, IntervalSweepConfig, SweepConfig
+from config import (
+    BaseConfig,
+    DelaySweepConfig,
+    GridSweepConfig,
+    IntervalSweepConfig,
+    SweepConfig,
+)
 
 logger = getLogger(__name__)
 
@@ -159,7 +165,9 @@ class PulseInstrument:
             self.idn = instr.query("*IDN?")
         except Exception:
             instr.close()
+            rm.close()
             raise
+        self._rm = rm  # prevent GC and allow explicit close
         self.instr = instr
         logger.info("Connected: %s", self.idn)
 
@@ -178,6 +186,7 @@ class PulseInstrument:
 
     def close(self) -> None:
         self.instr.close()
+        self._rm.close()
 
     @staticmethod
     def check_connection(visa_address: str) -> str:
@@ -637,6 +646,68 @@ def run_delay_sweep(
             callback(i, total)
 
     # Final wait
+    time.sleep(config.wait_time)
+
+
+# ================================================================== #
+#  Grid sweep execution (width × delay)
+# ================================================================== #
+def run_grid_sweep(
+    config: GridSweepConfig,
+    instrument: PulseInstrument,
+    callback: Callable[[int, int], None] | None = None,
+    *,
+    channels: list[int] | None = None,
+) -> None:
+    """Execute 2-D grid sweep over pulse width and trigger delay.
+
+    Parameters
+    ----------
+    config : GridSweepConfig
+    instrument : PulseInstrument
+    callback : (step_index, total_steps) -> None
+    channels : list of channel numbers (1 and/or 2). Defaults to [1].
+    """
+    if channels is None:
+        channels = [1]
+
+    widths = _generate_widths(
+        config.width_start, config.width_stop, config.width_step,
+        step_zones=config.step_zones,
+    )
+    delays = _generate_delays(config.delay_start, config.delay_stop, config.delay_step)
+    total = len(widths) * len(delays)
+    step = 0
+
+    if config.sweep_order == "width_outer":
+        for w_idx in range(len(widths)):
+            logger.info("Grid outer [width %d/%d] = %.4e s",
+                        w_idx + 1, len(widths), widths[w_idx])
+            for ch in channels:
+                instrument.select_segment(w_idx, channel=ch)
+            for delay in delays:
+                time.sleep(config.wait_time)
+                for ch in channels:
+                    instrument.set_trigger_delay(delay, channel=ch)
+                logger.info("  [%d/%d] delay=%d", step + 1, total, delay)
+                if callback is not None:
+                    callback(step, total)
+                step += 1
+    else:  # delay_outer
+        for delay in delays:
+            logger.info("Grid outer [delay %d/%d] = %d pts",
+                        delays.index(delay) + 1, len(delays), delay)
+            for ch in channels:
+                instrument.set_trigger_delay(delay, channel=ch)
+            for w_idx in range(len(widths)):
+                time.sleep(config.wait_time)
+                for ch in channels:
+                    instrument.select_segment(w_idx, channel=ch)
+                logger.info("  [%d/%d] width=%.4e s", step + 1, total, widths[w_idx])
+                if callback is not None:
+                    callback(step, total)
+                step += 1
+
     time.sleep(config.wait_time)
 
 

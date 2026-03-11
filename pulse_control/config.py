@@ -543,6 +543,172 @@ class DelaySweepConfig(BaseConfig):
 
 
 @dataclass
+class GridSweepConfig(BaseConfig):
+    """2-D grid sweep: pulse width × trigger delay."""
+
+    # Width axis
+    width_start: float
+    width_stop: float
+    width_step: float
+    step_zones: list[tuple[float, float]] | None = None
+
+    # Delay axis (sample points, multiples of 8)
+    delay_start: int = 0
+    delay_stop: int = 0
+    delay_step: int = 8
+
+    # Control
+    wait_time: float = 1.0
+    settling_time: float = 0.0
+    sweep_order: str = "width_outer"  # "width_outer" | "delay_outer"
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> GridSweepConfig:
+        """Load configuration from a TOML file."""
+        flat = cls._load_and_flatten_toml(path)
+        if "step_zones" in flat and flat["step_zones"] is not None:
+            flat["step_zones"] = [
+                (float(row[0]), float(row[1])) for row in flat["step_zones"]
+            ]
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in flat.items() if k in valid_keys}
+        for key in ("delay_start", "delay_stop", "delay_step"):
+            if key in filtered:
+                filtered[key] = int(filtered[key])
+        return cls(**filtered)
+
+    def to_toml(self, path: str | Path) -> None:
+        """Export to a TOML file."""
+        logger.info("Writing TOML: %s", path)
+        data = {
+            "connection": {
+                "visa_address": self.visa_address,
+            },
+            "pulse": {
+                "v_on": self.v_on,
+                "v_off": self.v_off,
+            },
+            "grid_sweep": {
+                "width_start": self.width_start,
+                "width_stop": self.width_stop,
+                "width_step": self.width_step,
+                "delay_start": self.delay_start,
+                "delay_stop": self.delay_stop,
+                "delay_step": self.delay_step,
+                "wait_time": self.wait_time,
+                "settling_time": self.settling_time,
+                "sweep_order": self.sweep_order,
+                **({"step_zones": [list(row) for row in self.step_zones]}
+                   if self.step_zones is not None else {}),
+            },
+            "awg": {
+                "frequency": self.frequency,
+                "period": self.period,
+                "trigger_delay": self.trigger_delay,
+            },
+        }
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            toml.dump(data, f)
+
+    def validate(self) -> list[str]:
+        """Validate parameter consistency."""
+        logger.info("Running validation")
+        errors = self._validate_common()
+
+        if self.width_start <= 0:
+            errors.append("width_start must be positive")
+        if self.width_stop <= 0:
+            errors.append("width_stop must be positive")
+        if self.width_step <= 0:
+            errors.append("width_step must be positive")
+
+        if self.delay_start < 0:
+            errors.append("delay_start must be >= 0")
+        if self.delay_stop < 0:
+            errors.append("delay_stop must be >= 0")
+        if self.delay_step <= 0:
+            errors.append("delay_step must be positive")
+
+        for name, val in [
+            ("delay_start", self.delay_start),
+            ("delay_stop", self.delay_stop),
+            ("delay_step", self.delay_step),
+        ]:
+            if val % 8 != 0:
+                errors.append(f"{name} must be a multiple of 8")
+
+        if self.wait_time < 0:
+            errors.append("wait_time must be >= 0")
+        if self.settling_time < 0:
+            errors.append("settling_time must be >= 0")
+
+        if self.sweep_order not in ("width_outer", "delay_outer"):
+            errors.append(
+                f"sweep_order must be 'width_outer' or 'delay_outer', "
+                f"got '{self.sweep_order}'"
+            )
+
+        if self.step_zones:
+            boundaries = [b for b, _ in self.step_zones]
+            if boundaries != sorted(boundaries):
+                errors.append("step_zones boundaries must be in ascending order")
+            for b, s in self.step_zones:
+                if s <= 0:
+                    errors.append(f"step_zones step must be positive, got {s}")
+                if b <= self.width_start or b >= self.width_stop:
+                    errors.append(
+                        f"step_zones boundary {b:.4e} must be between "
+                        f"width_start ({self.width_start:.4e}) and "
+                        f"width_stop ({self.width_stop:.4e})"
+                    )
+
+        # Duty cycle range check
+        for width in [self.width_start, self.width_stop]:
+            dcycle = width * self.frequency * 100
+            if dcycle < 0.1 or dcycle > 99.9:
+                errors.append(
+                    f"Duty cycle = {dcycle:.2f}% at width {width:.6f} s "
+                    "is out of range (0.1–99.9%)"
+                )
+
+        # Arbitrary-mode specific checks
+        from core import _calc_arb_params, _generate_widths
+
+        widths = _generate_widths(
+            self.width_start, self.width_stop, self.width_step,
+            step_zones=self.step_zones,
+        )
+        try:
+            sample_rate, points_per_period = _calc_arb_params(
+                self.frequency, widths, resolution_n=self.resolution_n,
+            )
+            if sample_rate < 10e6 or sample_rate > 4.2e9:
+                errors.append(
+                    f"Arbitrary mode sample rate = {sample_rate:.3e} Sa/s "
+                    "is out of range (10 MSa/s – 4.2 GSa/s)"
+                )
+            if points_per_period < 320:
+                errors.append(
+                    f"Arbitrary mode segment length = {points_per_period} "
+                    "is too short (must be >= 320)"
+                )
+            if points_per_period % 32 != 0:
+                errors.append(
+                    f"Arbitrary mode segment length = {points_per_period} "
+                    "must be a multiple of 32"
+                )
+        except ValueError as exc:
+            errors.append(f"Arbitrary mode parameter error: {exc}")
+
+        for e in errors:
+            logger.warning("Validation error: %s", e)
+
+        return errors
+
+
+@dataclass
 class PumpProbeConfig(BaseConfig):
     """Pump-probe multi-pulse output configuration for Agilent 81180A AWG.
 
@@ -940,6 +1106,15 @@ def load_unified_toml(path: str | Path) -> dict:
         isw["step_zones"] = [
             (float(row[0]), float(row[1])) for row in isw["step_zones"]
         ]
+    # Grid sweep section
+    gs = data.get("grid_sweep", {})
+    if "step_zones" in gs and gs["step_zones"] is not None:
+        gs["step_zones"] = [
+            (float(row[0]), float(row[1])) for row in gs["step_zones"]
+        ]
+    for key in ("delay_start", "delay_stop", "delay_step"):
+        if key in gs:
+            gs[key] = int(gs[key])
     return data
 
 

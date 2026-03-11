@@ -65,9 +65,11 @@ class Multimeter:
             self.idn = instr.query("*IDN?")
         except Exception:
             instr.close()
+            rm.close()
             raise
         # RS-232 requires explicit remote mode (unlike GPIB)
         instr.write("SYST:REM")
+        self._rm = rm  # prevent GC and allow explicit close
         self.instr = instr
         logger.info("Connected: %s", self.idn)
 
@@ -100,6 +102,10 @@ class Multimeter:
             pass
         try:
             self.instr.close()
+        except Exception:
+            pass
+        try:
+            self._rm.close()
         except Exception:
             pass
 
