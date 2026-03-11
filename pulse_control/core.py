@@ -204,6 +204,7 @@ class PulseInstrument:
             raise
         finally:
             instr.close()
+            rm.close()
         logger.info("Connection check OK: %s", idn)
         return idn
 
