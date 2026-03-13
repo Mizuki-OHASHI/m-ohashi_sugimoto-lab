@@ -444,6 +444,12 @@ if "_pending_import" in st.session_state:
     st.rerun()  # force re-evaluation of _common, _ws, _isw, etc.
 
 
+def _request_deferred_rerun() -> None:
+    # Once widget rendering has started, rerun only after all tabs render so
+    # Streamlit keeps widget state for inactive tabs.
+    st.session_state["_needs_rerun"] = True
+
+
 # ================================================================== #
 #  Instrument helpers
 # ================================================================== #
@@ -567,7 +573,7 @@ with st.sidebar:
     with btn_col1:
         if st.button("Reset", use_container_width=True):
             st.session_state._w_visa_address = DEFAULT_VISA_ADDRESS
-            st.rerun()
+            _request_deferred_rerun()
     with btn_col2:
         check_conn = st.button("Check", use_container_width=True)
 
@@ -626,7 +632,7 @@ with st.sidebar:
                     tmp.flush()
                     try:
                         st.session_state._pending_import = load_unified_toml(tmp.name)
-                        st.rerun()
+                        _request_deferred_rerun()
                     except Exception as exc:
                         st.error(f"Import failed: {exc}")
 
@@ -859,12 +865,12 @@ with tab_pulse:
                 # Sort by pulse_width
                 records.sort(key=lambda r: parse_si(r["pulse_width"]))
                 _save_records_to_csv(records)
-                st.rerun()
+                _request_deferred_rerun()
 
             if _btn_clear:
                 st.session_state.saved_pulse_records = []
                 _save_records_to_csv([])
-                st.rerun()
+                _request_deferred_rerun()
 
             if st.session_state.saved_pulse_records:
                 lines = ["timestamp,pulse_width,trigger_delay"]
@@ -880,13 +886,13 @@ with tab_pulse:
                 except Exception as exc:
                     logger.error("Teardown CH1 error: %s", exc)
                 logger.info("Pulse CH1 stopped via UI")
-                st.rerun()
+                _request_deferred_rerun()
             elif pulse_config is not None:
                 try:
                     _pulse_start(pulse_config, channel=1)
                     st.session_state.ch1_running = True
                     logger.info("Pulse CH1 started via UI (%s)", pulse_config.waveform_mode)
-                    st.rerun()
+                    _request_deferred_rerun()
                 except Exception as exc:
                     st.error(f"Error: {exc}")
                     logger.exception("Error starting pulse CH1")
@@ -899,13 +905,13 @@ with tab_pulse:
                 except Exception as exc:
                     logger.error("Teardown CH2 error: %s", exc)
                 logger.info("Pulse CH2 stopped via UI")
-                st.rerun()
+                _request_deferred_rerun()
             elif pulse_config is not None:
                 try:
                     _pulse_start(pulse_config, channel=2)
                     st.session_state.ch2_running = True
                     logger.info("Pulse CH2 started via UI (%s)", pulse_config.waveform_mode)
-                    st.rerun()
+                    _request_deferred_rerun()
                 except Exception as exc:
                     st.error(f"Error: {exc}")
                     logger.exception("Error starting pulse CH2")
@@ -922,7 +928,7 @@ with tab_pulse:
                         inst.set_trigger_delay(delay_val, channel=ch_num)
                 st.session_state.last_trigger_delay = delay_val
                 logger.info("Live connection opened")
-                st.rerun()
+                _request_deferred_rerun()
             except Exception as exc:
                 st.error(f"Live connection failed: {exc}")
                 st.session_state.live_connection = False
@@ -930,7 +936,7 @@ with tab_pulse:
 
         if live_off:
             _close_live_connection()
-            st.rerun()
+            _request_deferred_rerun()
 
         if is_live and not live_off:
             delay_val = int(trigger_delay)
@@ -1114,12 +1120,12 @@ with tab_pp:
                     records.append(new_record)
                 records.sort(key=lambda r: parse_si(r["pulse_interval"]))
                 _save_pp_records_to_csv(records)
-                st.rerun()
+                _request_deferred_rerun()
 
             if _pp_btn_clear:
                 st.session_state.saved_pp_records = []
                 _save_pp_records_to_csv([])
-                st.rerun()
+                _request_deferred_rerun()
 
             if st.session_state.saved_pp_records:
                 lines = ["timestamp,pulse_interval,trigger_delay"]
@@ -1136,13 +1142,13 @@ with tab_pp:
                 except Exception as exc:
                     logger.error("Teardown CH1 error: %s", exc)
                 logger.info("Pump-probe CH1 stopped via UI")
-                st.rerun()
+                _request_deferred_rerun()
             elif pp_config is not None:
                 try:
                     _pump_probe_start(pp_config, channel=1)
                     st.session_state.pp_ch1_running = True
                     logger.info("Pump-probe CH1 started via UI")
-                    st.rerun()
+                    _request_deferred_rerun()
                 except Exception as exc:
                     st.error(f"Error: {exc}")
                     logger.exception("Error starting pump-probe CH1")
@@ -1156,13 +1162,13 @@ with tab_pp:
                 except Exception as exc:
                     logger.error("Teardown CH2 error: %s", exc)
                 logger.info("Pump-probe CH2 stopped via UI")
-                st.rerun()
+                _request_deferred_rerun()
             elif pp_config is not None:
                 try:
                     _pump_probe_start(pp_config, channel=2)
                     st.session_state.pp_ch2_running = True
                     logger.info("Pump-probe CH2 started via UI")
-                    st.rerun()
+                    _request_deferred_rerun()
                 except Exception as exc:
                     st.error(f"Error: {exc}")
                     logger.exception("Error starting pump-probe CH2")
@@ -1179,7 +1185,7 @@ with tab_pp:
                         inst.set_trigger_delay(delay_val, channel=ch_num)
                 st.session_state.last_trigger_delay = delay_val
                 logger.info("Live connection opened (pump-probe tab)")
-                st.rerun()
+                _request_deferred_rerun()
             except Exception as exc:
                 st.error(f"Live connection failed: {exc}")
                 st.session_state.live_connection = False
@@ -1187,7 +1193,7 @@ with tab_pp:
 
         if pp_live_off:
             _close_live_connection()
-            st.rerun()
+            _request_deferred_rerun()
 
         # Live trigger delay update (pump-probe tab)
         if pp_is_live and not pp_live_off:
@@ -3926,3 +3932,6 @@ with _save_btn_placeholder.container():
         except Exception as exc:
             st.error(f"Save failed: {exc}")
             logger.exception("Config save error")
+
+if st.session_state.pop("_needs_rerun", False):
+    st.rerun()
