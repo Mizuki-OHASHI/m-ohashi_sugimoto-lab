@@ -99,8 +99,12 @@ def main_sweep(config_path: str) -> None:
         trigger_delay_stop=ws.get("trigger_delay_stop"),
         delay_exponent=ws.get("delay_exponent", 1.0),
         delay_mode=ws.get("delay_mode", "exponent"),
-        delay_table=ws.get("delay_table"),
-        step_zones=ws.get("step_zones"),
+        delay_table=[
+            (float(row[0]), int(row[1])) for row in ws["delay_table"]
+        ] if ws.get("delay_table") is not None else None,
+        step_zones=[
+            (float(row[0]), float(row[1])) for row in ws["step_zones"]
+        ] if ws.get("step_zones") is not None else None,
     )
 
     errors = config.validate()
@@ -172,8 +176,12 @@ def main_integration(config_path: str) -> None:
         trigger_delay_stop=ws.get("trigger_delay_stop"),
         delay_exponent=ws.get("delay_exponent", 1.0),
         delay_mode=ws.get("delay_mode", "exponent"),
-        delay_table=ws.get("delay_table"),
-        step_zones=ws.get("step_zones"),
+        delay_table=[
+            (float(row[0]), int(row[1])) for row in ws["delay_table"]
+        ] if ws.get("delay_table") is not None else None,
+        step_zones=[
+            (float(row[0]), float(row[1])) for row in ws["step_zones"]
+        ] if ws.get("step_zones") is not None else None,
     )
 
     integration_config = IntegrationConfig(
@@ -261,8 +269,12 @@ def main_step_sync(config_path: str) -> None:
         trigger_delay_stop=ws.get("trigger_delay_stop"),
         delay_exponent=ws.get("delay_exponent", 1.0),
         delay_mode=ws.get("delay_mode", "exponent"),
-        delay_table=ws.get("delay_table"),
-        step_zones=ws.get("step_zones"),
+        delay_table=[
+            (float(row[0]), int(row[1])) for row in ws["delay_table"]
+        ] if ws.get("delay_table") is not None else None,
+        step_zones=[
+            (float(row[0]), float(row[1])) for row in ws["step_zones"]
+        ] if ws.get("step_zones") is not None else None,
     )
 
     step_sync_config = StepSyncConfig(

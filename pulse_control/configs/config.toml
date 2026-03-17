@@ -42,3 +42,14 @@ delay_stop = 80
 delay_step = 8
 wait_time = 1.0
 settling_time = 0.0
+
+[grid_sweep]
+width_start = 2.5e-9
+width_stop = 1.6e-7
+width_step = 5e-9
+delay_start = 0
+delay_stop = 6400
+delay_step = 16
+wait_time = 1.0
+settling_time = 0.0
+sweep_order = "width_outer"

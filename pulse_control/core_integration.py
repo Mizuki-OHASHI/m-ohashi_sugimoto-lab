@@ -269,6 +269,12 @@ def run_integrated_sweep(
             )
         logger.info("Waveform upload complete.")
 
+        # Settling phase (match Streamlit UI behavior)
+        if sweep_config.settling_time > 0:
+            logger.info("Settling for %.1f s...", sweep_config.settling_time)
+            time.sleep(sweep_config.settling_time)
+            logger.info("Settling complete.")
+
         # --- Phase 2: Cycle loop ---
         cycle = 0
         max_cycles = integration_config.num_cycles
