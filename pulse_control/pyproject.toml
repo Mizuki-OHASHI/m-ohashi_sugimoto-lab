@@ -1,0 +1,22 @@
+[project]
+name = "pulse-control"
+version = "0.1.0"
+description = "Agilent 81180A パルス制御ツール"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "pyvisa",
+    "pyvisa-py",
+    "pyserial",
+    "streamlit",
+    "toml",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+[project.scripts]
+pulse-control = "main:main"
