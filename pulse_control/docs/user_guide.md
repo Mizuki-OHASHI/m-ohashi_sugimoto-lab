@@ -22,6 +22,55 @@
 - **Agilent 81180A** 任意波形発生器 — LAN (TCP/IP) 接続
 - **Agilent 34401A** デジタルマルチメータ — USB-Serial 接続 (オートトリガー使用時のみ)
 
+### LAN 接続のセットアップ
+
+81180A とは LAN ケーブルで PC に直結して通信します。DHCP サーバーを介さないため、PC 側の Ethernet アダプターに静的 IP を手動設定する必要があります。
+
+1. 81180A と PC を LAN ケーブルで接続する
+2. PowerShell を **管理者として** 開く
+3. アダプター名を確認する:
+
+```powershell
+PS> Get-NetAdapter
+
+Name                      InterfaceDescription                    ifIndex Status       ...
+----                      --------------------                    ------- ------       ...
+イーサネット 2            ASIX AX88179 USB 3.0 to Gigabit Ethe...       3 Up           ...
+イーサネット              Intel(R) Ethernet Connection (14) I2...      16 Up           ...
+Wi-Fi                     Intel(R) Wi-Fi 6 AX201 160MHz                13 Disconnected ...
+```
+
+4. 81180A に繋いだアダプターに静的 IP を設定する (アダプター名は環境に合わせること):
+
+```powershell
+PS> New-NetIPAddress -InterfaceAlias "イーサネット 2" -IPAddress 192.168.0.100 -PrefixLength 24
+```
+
+5. 疎通を確認する:
+
+```powershell
+PS> ping 192.168.0.251
+Reply from 192.168.0.251: bytes=32 time=1ms TTL=64
+```
+
+> 81180A の IP アドレス (デフォルト `192.168.0.251`) は本体の Utility > Remote Interface > LAN で確認できます。PC 側の IP は `192.168.0.x` (`x` ≠ `251`) であれば任意です。
+
+### DMM (34401A) の接続セットアップ
+
+34401A は RS-232 シリアル通信で、USB-Serial アダプタ (Prolific PL2303GT) を介して PC に接続します。オートトリガー機能を使わない場合はこの手順は不要です。
+
+#### ドライバ
+
+USB-Serial アダプタを PC に挿した際、デバイスマネージャーの「ポート (COM と LPT)」に COM デバイスが表示されない、または `!` マークがついている場合は、**Prolific PL2303 ドライバ** をインストールしてください。
+
+#### COM ポート番号の確認
+
+アプリでは DMM の VISA アドレスを `ASRL[N]::INSTR` の形式で指定します (`N` = COM ポート番号)。COM ポート番号は PC ごとに異なるため、以下の手順で特定します。
+
+1. Device Manager の「Ports (COM & LPT)」を開く
+2. USB-Serial アダプタを **抜き差し** して、消える/現れる COM ポートの番号を確認する
+3. 例えば現在 RT0 の PC では COM6 に繋がっているので、アプリの DMM VISA Address に **`ASRL6::INSTR`** と入力する
+
 ### 起動方法
 
 ```bash
